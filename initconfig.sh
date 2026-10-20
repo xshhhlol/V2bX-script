@@ -12,21 +12,20 @@ check_ipv6_support() {
 
 add_node_config() {
     echo -e "${green}请选择节点核心类型：${plain}"
-    echo -e "${green}1. xray${plain}"
-    echo -e "${green}2. singbox${plain}"
-    echo -e "${green}3. hysteria2${plain}"
-    read -rp "请输入：" core_type
-    if [ "$core_type" == "1" ]; then
-        core="xray"
-        core_xray=true
-    elif [ "$core_type" == "2" ]; then
+    echo -e "${green}1. singbox${plain}"
+    echo -e "${green}2. hysteria2${plain}"
+    read -rp "请输入：" core_choice
+    # 当前发布版本未包含 xray 内核；core_type 沿用原编号（2=sing，3=hysteria2）
+    if [ "$core_choice" == "1" ]; then
+        core_type="2"
         core="sing"
         core_sing=true
-    elif [ "$core_type" == "3" ]; then
+    elif [ "$core_choice" == "2" ]; then
+        core_type="3"
         core="hysteria2"
         core_hysteria2=true
     else
-        echo "无效的选择。请选择 1 2 3。"
+        echo "无效的选择。请选择 1 2。"
         continue
     fi
     while true; do
@@ -413,7 +412,8 @@ EOF
     "servers": [
       {
         "tag": "cf",
-        "address": "1.1.1.1"
+        "type": "udp",
+        "server": "1.1.1.1"
       }
     ],
     "strategy": "$dnsstrategy"
@@ -426,17 +426,13 @@ EOF
         "server": "cf",
         "strategy": "$dnsstrategy"
       }
-    },
-    {
-      "type": "block",
-      "tag": "block"
     }
   ],
   "route": {
     "rules": [
       {
         "ip_is_private": true,
-        "outbound": "block"
+        "action": "reject"
       },
       {
         "domain_regex": [
@@ -463,7 +459,7 @@ EOF
             "(.*.||)(laomoe|jiyou|ssss|lolicp|vv1234|0z|4321q|868123|ksweb|mm126).(com|cloud|fun|cn|gs|xyz|cc)",
             "(flows|miaoko).(pages).(dev)"
         ],
-        "outbound": "block"
+        "action": "reject"
       },
       {
         "outbound": "direct",
