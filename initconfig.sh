@@ -118,7 +118,7 @@ add_node_config() {
             "FallBackSite": {
                 "Enable": true,
                 "Root": "/etc/V2bX/www",
-                "RedirectHTTP": __REDIRECT_HTTP__
+                "RedirectHTTP": true
             },'
             if [[ "$NodeType" == "anytls" ]]; then
                 harden_config+='
@@ -129,9 +129,6 @@ add_node_config() {
             },'
             fi
         fi
-    fi
-    if [[ "$certmode" == "http" ]]; then
-        http_cert_used=true
     fi
     ipv6_support=$(check_ipv6_support)
     listen_ip="0.0.0.0"
@@ -302,7 +299,6 @@ generate_config_file() {
     core_sing=false
     core_hysteria2=false
     need_fallback_site=false
-    http_cert_used=false
     fixed_api_info=false
     check_api=false
     
@@ -386,12 +382,6 @@ generate_config_file() {
     mv config.json config.json.bak
     nodes_config_str="${nodes_config[*]}"
     formatted_nodes_config="${nodes_config_str%,}"
-    # http 模式申请证书时 V2bX 要临时占用 80 端口，此时不做 80 跳转
-    redirect_http=true
-    if [ "$http_cert_used" = true ]; then
-        redirect_http=false
-    fi
-    formatted_nodes_config="${formatted_nodes_config//__REDIRECT_HTTP__/$redirect_http}"
     if [ "$need_fallback_site" = true ]; then
         generate_fallback_site
     fi
