@@ -295,8 +295,101 @@ show_log() {
     fi
 }
 
-install_bbr() {
-    bash <(curl -L -s https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcpx.sh)
+# 网络优化：BBR、闲置后不重新慢启动、限制发送积压、加大缓冲区、调大初始拥塞窗口
+# 只改内核参数，不更换内核；可重复执行
+optimize_network() {
+    echo -e "${green}开始优化网络参数（不更换内核）${plain}"
+    local cc_line=""
+    modprobe tcp_bbr 2>/dev/null
+    if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+        cc_line="net.ipv4.tcp_congestion_control=bbr"
+        if [[ x"${release}" == x"alpine" ]]; then
+            grep -qx tcp_bbr /etc/modules 2>/dev/null || echo tcp_bbr >> /etc/modules
+        else
+            mkdir -p /etc/modules-load.d && echo tcp_bbr > /etc/modules-load.d/bbr.conf
+        fi
+    else
+        echo -e "${yellow}当前内核（$(uname -r)）不支持 BBR，跳过拥塞控制，其余参数照常优化${plain}"
+    fi
+
+    # 文件名排在 99-sysctl.conf 之后，开机时不会被它覆盖
+    mkdir -p /etc/sysctl.d
+    cat > /etc/sysctl.d/99-v2bx-net.conf <<EOF
+net.core.default_qdisc=fq
+${cc_line}
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_notsent_lowat=131072
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.ipv4.tcp_rmem=4096 131072 16777216
+net.ipv4.tcp_wmem=4096 65536 16777216
+net.ipv4.tcp_mtu_probing=1
+EOF
+    if ! sysctl -p /etc/sysctl.d/99-v2bx-net.conf >/dev/null 2>&1; then
+        echo -e "${yellow}部分参数无法设置（容器类 VPS 通常不允许修改），已设置的部分照常生效${plain}"
+    fi
+
+    # 已有网卡的队列不会自动切换到 fq，这里立即替换
+    local dev
+    dev=$(ip route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
+    if [[ -n "$dev" ]] && command -v tc >/dev/null 2>&1; then
+        local queues
+        queues=$(ls -d /sys/class/net/"$dev"/queues/tx-* 2>/dev/null | wc -l)
+        if [[ "$queues" -gt 1 ]]; then
+            tc qdisc replace dev "$dev" root handle 1: mq 2>/dev/null &&
+                for i in $(seq 1 "$queues"); do tc qdisc replace dev "$dev" parent 1:$(printf %x "$i") fq 2>/dev/null; done
+        else
+            tc qdisc replace dev "$dev" root fq 2>/dev/null
+        fi
+    fi
+
+    # 初始拥塞窗口写在路由上，开机后由服务重新设置
+    cat > /usr/local/bin/v2bx-initcwnd.sh <<'EOF'
+#!/bin/sh
+# 调大默认路由的初始拥塞窗口，缩短新连接的起步时间
+for family in -4 -6; do
+    route=$(ip $family route show default 2>/dev/null | head -1 | sed 's/ initcwnd [0-9]*//; s/ initrwnd [0-9]*//')
+    [ -n "$route" ] && ip $family route change $route initcwnd 32 initrwnd 32 2>/dev/null
+done
+exit 0
+EOF
+    chmod +x /usr/local/bin/v2bx-initcwnd.sh
+    if [[ x"${release}" == x"alpine" ]]; then
+        mkdir -p /etc/local.d
+        ln -sf /usr/local/bin/v2bx-initcwnd.sh /etc/local.d/v2bx-initcwnd.start
+        rc-update add local default >/dev/null 2>&1
+    else
+        cat > /etc/systemd/system/v2bx-initcwnd.service <<'EOF'
+[Unit]
+Description=Raise initcwnd for V2bX
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/v2bx-initcwnd.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+        systemctl enable v2bx-initcwnd.service >/dev/null 2>&1
+    fi
+    /usr/local/bin/v2bx-initcwnd.sh
+
+    echo -e "拥塞控制：$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)，队列：$(sysctl -n net.core.default_qdisc 2>/dev/null)，闲置后慢启动：$(sysctl -n net.ipv4.tcp_slow_start_after_idle 2>/dev/null)（0 为关闭）"
+    # 新连接沿用监听端口创建时的拥塞控制，需重启 V2bX 才会切换
+    check_status
+    if [[ $? == 0 ]]; then
+        echo -e "${green}网络优化完成，正在重启 V2bX 使其生效${plain}"
+        restart 0
+    else
+        echo -e "${green}网络优化完成，V2bX 下次启动时生效${plain}"
+    fi
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
 }
 
 update_shell() {
@@ -468,6 +561,7 @@ show_usage() {
     echo "V2bX log          - 查看 V2bX 日志"
     echo "V2bX x25519       - 生成 x25519 密钥"
     echo "V2bX generate     - 生成 V2bX 配置文件"
+    echo "V2bX optimize     - 网络优化 (BBR 等)"
     echo "V2bX update       - 更新 V2bX"
     echo "V2bX update x.x.x - 安装 V2bX 指定版本"
     echo "V2bX install      - 安装 V2bX"
@@ -495,7 +589,7 @@ show_menu() {
   ${green}9.${plain} 设置 V2bX 开机自启
   ${green}10.${plain} 取消 V2bX 开机自启
 ————————————————
-  ${green}11.${plain} 一键安装 bbr (最新内核)
+  ${green}11.${plain} 网络优化：开启 BBR 等 (无需换内核)
   ${green}12.${plain} 查看 V2bX 版本
   ${green}13.${plain} 生成 X25519 密钥
   ${green}14.${plain} 升级 V2bX 维护脚本
@@ -519,7 +613,7 @@ show_menu() {
         8) check_install && show_log ;;
         9) check_install && enable ;;
         10) check_install && disable ;;
-        11) install_bbr ;;
+        11) optimize_network ;;
         12) check_install && show_V2bX_version ;;
         13) check_install && generate_x25519_key ;;
         14) update_shell ;;
@@ -543,6 +637,7 @@ if [[ $# > 0 ]]; then
         "update") check_install 0 && update 0 $2 ;;
         "config") config $* ;;
         "generate") generate_config_file ;;
+        "optimize") optimize_network 0 ;;
         "install") check_uninstall 0 && install 0 ;;
         "uninstall") check_install 0 && uninstall 0 ;;
         "x25519") check_install 0 && generate_x25519_key 0 ;;

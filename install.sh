@@ -252,6 +252,8 @@ EOF
         ln -s /usr/bin/V2bX /usr/bin/v2bx
         chmod +x /usr/bin/v2bx
     fi
+    # 自动做网络优化（BBR、闲置不重新慢启动等），不更换内核
+    /usr/bin/V2bX optimize
     cd $cur_dir
     rm -f install.sh
     echo -e ""
@@ -267,6 +269,7 @@ EOF
     echo "V2bX log          - 查看 V2bX 日志"
     echo "V2bX x25519       - 生成 x25519 密钥"
     echo "V2bX generate     - 生成 V2bX 配置文件"
+    echo "V2bX optimize     - 网络优化 (BBR 等)"
     echo "V2bX update       - 更新 V2bX"
     echo "V2bX update x.x.x - 更新 V2bX 指定版本"
     echo "V2bX install      - 安装 V2bX"
