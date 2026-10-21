@@ -71,6 +71,8 @@ add_node_config() {
         esac
     fi
     fastopen=true
+    isreality=""
+    istls=""
     if [ "$NodeType" == "vless" ]; then
         read -rp "请选择是否为reality节点？(y/n)" isreality
     elif [ "$NodeType" == "hysteria" ] || [ "$NodeType" == "hysteria2" ] || [ "$NodeType" == "tuic" ] || [ "$NodeType" == "anytls" ]; then
@@ -99,6 +101,37 @@ add_node_config() {
         if [ "$certmode" != "http" ]; then
             echo -e "${red}请手动修改配置文件后重启V2bX！${plain}"
         fi
+    fi
+    # trojan/anytls 的 TLS 节点：未通过认证的连接回落到 V2bX 内置的伪装网站
+    reject_sni=false
+    harden_config=""
+    if [[ "$core_sing" == true && "$certmode" != "none" && ( "$NodeType" == "trojan" || "$NodeType" == "anytls" ) ]]; then
+        read -rp "是否启用伪装网站和抗主动探测？无需安装 nginx（推荐，回车默认 y）(y/n)：" harden_choice
+        if [[ ! "$harden_choice" =~ ^[Nn] ]]; then
+            need_fallback_site=true
+            # 只有正规证书才拒绝未知 SNI，自签证书的客户端可能不带 SNI
+            if [[ "$certmode" == "http" || "$certmode" == "dns" ]]; then
+                reject_sni=true
+                echo -e "${yellow}提示：SNI 与证书域名不符的连接会被拒绝；面板节点地址若填 IP，请把 server_name 填为 ${certdomain}${plain}"
+            fi
+            harden_config='
+            "FallBackSite": {
+                "Enable": true,
+                "Root": "/etc/V2bX/www",
+                "RedirectHTTP": __REDIRECT_HTTP__
+            },'
+            if [[ "$NodeType" == "anytls" ]]; then
+                harden_config+='
+            "AnyTLSConfig": {
+                "TrafficShaping": {
+                    "Enable": true
+                }
+            },'
+            fi
+        fi
+    fi
+    if [[ "$certmode" == "http" ]]; then
+        http_cert_used=true
     fi
     ipv6_support=$(check_ipv6_support)
     listen_ip="0.0.0.0"
@@ -152,10 +185,10 @@ EOF
             "DeviceOnlineMinTraffic": 200,
             "MinReportTraffic": 0,
             "TCPFastOpen": $fastopen,
-            "SniffEnabled": true,
+            "SniffEnabled": true,$harden_config
             "CertConfig": {
                 "CertMode": "$certmode",
-                "RejectUnknownSni": false,
+                "RejectUnknownSni": $reject_sni,
                 "CertDomain": "$certdomain",
                 "CertFile": "/etc/V2bX/fullchain.cer",
                 "KeyFile": "/etc/V2bX/cert.key",
@@ -201,6 +234,55 @@ EOF
     nodes_config+=("$node_config")
 }
 
+# 生成伪装网站首页；已存在则保留，可自行替换 /etc/V2bX/www 下的文件
+generate_fallback_site() {
+    local site_dir=/etc/V2bX/www
+    if [ -f "$site_dir/index.html" ]; then
+        return
+    fi
+    mkdir -p "$site_dir"
+    local names=("Field Notes" "Small Workshop" "Quiet Corner" "Weekend Log" "Paper Trail" "Slow Notes" "Night Shift" "Open Drawer")
+    local topics=("home server maintenance" "film photography" "bread baking" "trail running" "keyboard building" "city cycling" "houseplants" "old radios")
+    local site_name=${names[$((RANDOM % ${#names[@]}))]}
+    local topic_a=${topics[$((RANDOM % ${#topics[@]}))]}
+    local topic_b=${topics[$((RANDOM % ${#topics[@]}))]}
+    local year
+    year=$(date +%Y)
+    cat <<SITE > "$site_dir/index.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>$site_name</title>
+<style>
+body{max-width:42rem;margin:3rem auto;padding:0 1rem;font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#222;background:#fff}
+.meta{color:#777;font-size:.9rem}
+article{margin:2rem 0;border-top:1px solid #eee;padding-top:1rem}
+footer{margin-top:3rem;color:#999;font-size:.85rem}
+</style>
+</head>
+<body>
+<header>
+<h1>$site_name</h1>
+<p class="meta">A personal notebook about $topic_a and other things.</p>
+</header>
+<article>
+<h2>Notes on $topic_a</h2>
+<p class="meta">$year</p>
+<p>Collected notes, mistakes and small fixes, written down so the next attempt goes a little better than the last one.</p>
+</article>
+<article>
+<h2>Getting started with $topic_b</h2>
+<p class="meta">$((year - 1))</p>
+<p>What worked, what did not, and a short list of things to try next time.</p>
+</article>
+<footer>&copy; $year $site_name</footer>
+</body>
+</html>
+SITE
+}
+
 generate_config_file() {
     echo -e "${yellow}V2bX 配置文件生成向导${plain}"
     echo -e "${red}请阅读以下注意事项：${plain}"
@@ -219,6 +301,8 @@ generate_config_file() {
     core_xray=false
     core_sing=false
     core_hysteria2=false
+    need_fallback_site=false
+    http_cert_used=false
     fixed_api_info=false
     check_api=false
     
@@ -302,6 +386,15 @@ generate_config_file() {
     mv config.json config.json.bak
     nodes_config_str="${nodes_config[*]}"
     formatted_nodes_config="${nodes_config_str%,}"
+    # http 模式申请证书时 V2bX 要临时占用 80 端口，此时不做 80 跳转
+    redirect_http=true
+    if [ "$http_cert_used" = true ]; then
+        redirect_http=false
+    fi
+    formatted_nodes_config="${formatted_nodes_config//__REDIRECT_HTTP__/$redirect_http}"
+    if [ "$need_fallback_site" = true ]; then
+        generate_fallback_site
+    fi
 
     # 创建 config.json 文件
     cat <<EOF > /etc/V2bX/config.json
