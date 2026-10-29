@@ -224,8 +224,8 @@ EOF
             systemctl start V2bX
         fi
         sleep 2
-        check_status
         echo -e ""
+        check_status
         if [[ $? == 0 ]]; then
             echo -e "${green}V2bX 重启成功${plain}"
         else

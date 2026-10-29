@@ -158,15 +158,21 @@ uninstall() {
         service V2bX stop
         rc-update del V2bX
         rm /etc/init.d/V2bX -f
+        rm /etc/local.d/v2bx-initcwnd.start -f
     else
         systemctl stop V2bX
         systemctl disable V2bX
         rm /etc/systemd/system/V2bX.service -f
+        systemctl disable v2bx-initcwnd.service 2>/dev/null
+        rm /etc/systemd/system/v2bx-initcwnd.service -f
         systemctl daemon-reload
         systemctl reset-failed
     fi
     rm /etc/V2bX/ -rf
     rm /usr/local/V2bX/ -rf
+    # 网络优化的参数文件，重启后内核参数恢复系统默认
+    rm /etc/sysctl.d/99-v2bx-net.conf -f
+    rm /usr/local/bin/v2bx-initcwnd.sh -f
 
     echo ""
     echo -e "卸载成功，如果你想删除此脚本，则退出脚本后运行 ${green}rm /usr/bin/V2bX -f${plain} 进行删除"
@@ -620,7 +626,7 @@ show_menu() {
         15) generate_config_file ;;
         16) open_ports ;;
         17) exit ;;
-        *) echo -e "${red}请输入正确的数字 [0-16]${plain}" ;;
+        *) echo -e "${red}请输入正确的数字 [0-17]${plain}" ;;
     esac
 }
 

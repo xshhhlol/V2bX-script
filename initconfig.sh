@@ -14,20 +14,23 @@ add_node_config() {
     echo -e "${green}请选择节点核心类型：${plain}"
     echo -e "${green}1. singbox${plain}"
     echo -e "${green}2. hysteria2${plain}"
-    read -rp "请输入：" core_choice
     # 当前发布版本未包含 xray 内核；core_type 沿用原编号（2=sing，3=hysteria2）
-    if [ "$core_choice" == "1" ]; then
-        core_type="2"
-        core="sing"
-        core_sing=true
-    elif [ "$core_choice" == "2" ]; then
-        core_type="3"
-        core="hysteria2"
-        core_hysteria2=true
-    else
-        echo "无效的选择。请选择 1 2。"
-        continue
-    fi
+    while true; do
+        read -rp "请输入：" core_choice
+        if [ "$core_choice" == "1" ]; then
+            core_type="2"
+            core="sing"
+            core_sing=true
+            break
+        elif [ "$core_choice" == "2" ]; then
+            core_type="3"
+            core="hysteria2"
+            core_hysteria2=true
+            break
+        else
+            echo "无效的选择。请选择 1 2。"
+        fi
+    done
     while true; do
         read -rp "请输入节点Node ID：" NodeID
         # 判断NodeID是否为正整数
