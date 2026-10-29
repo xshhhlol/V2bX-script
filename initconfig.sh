@@ -105,10 +105,10 @@ add_node_config() {
             echo -e "${red}请手动修改配置文件后重启V2bX！${plain}"
         fi
     fi
-    # trojan/anytls 的 TLS 节点：未通过认证的连接回落到 V2bX 内置的伪装网站
+    # trojan/anytls 的 TLS 节点、vmess 节点（有无 TLS 均可）：未通过认证的连接回落到 V2bX 内置的伪装网站
     reject_sni=false
     harden_config=""
-    if [[ "$core_sing" == true && "$certmode" != "none" && ( "$NodeType" == "trojan" || "$NodeType" == "anytls" ) ]]; then
+    if [[ "$core_sing" == true && ( ( "$certmode" != "none" && ( "$NodeType" == "trojan" || "$NodeType" == "anytls" ) ) || "$NodeType" == "vmess" ) ]]; then
         read -rp "是否启用伪装网站和抗主动探测？无需安装 nginx（推荐，回车默认 y）(y/n)：" harden_choice
         if [[ ! "$harden_choice" =~ ^[Nn] ]]; then
             need_fallback_site=true
@@ -117,12 +117,28 @@ add_node_config() {
                 reject_sni=true
                 echo -e "${yellow}提示：SNI 与证书域名不符的连接会被拒绝；面板节点地址若填 IP，请把 server_name 填为 ${certdomain}${plain}"
             fi
+            # 没有 TLS 时 80 端口无处可跳
+            redirect_http=true
+            if [[ "$certmode" == "none" ]]; then
+                redirect_http=false
+            fi
             harden_config='
             "FallBackSite": {
                 "Enable": true,
                 "Root": "/etc/V2bX/www",
-                "RedirectHTTP": true
+                "RedirectHTTP": '"$redirect_http"'
             },'
+            if [[ "$NodeType" == "vmess" ]]; then
+                # 伪装网站只在面板传输协议为 tcp 时生效；ws/grpc 等由传输层自己应答
+                echo -e "${yellow}提示：VMess 的伪装网站需面板传输协议为 tcp；未开 TLS 时会拒绝 none 等不加密的客户端，客户端加密方式请用 auto${plain}"
+                harden_config+='
+            "VMessConfig": {
+                "RequireEncryption": true,
+                "TrafficShaping": {
+                    "Enable": true
+                }
+            },'
+            fi
             if [[ "$NodeType" == "anytls" ]]; then
                 harden_config+='
             "AnyTLSConfig": {
