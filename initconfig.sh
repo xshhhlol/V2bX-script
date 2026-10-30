@@ -129,11 +129,20 @@ add_node_config() {
                 "RedirectHTTP": '"$redirect_http"'
             },'
             if [[ "$NodeType" == "vmess" ]]; then
-                # 伪装网站只在面板传输协议为 tcp 时生效；ws/grpc 等由传输层自己应答
-                echo -e "${yellow}提示：VMess 的伪装网站需面板传输协议为 tcp；未开 TLS 时会拒绝 none 等不加密的客户端，客户端加密方式请用 auto${plain}"
+                # 网站仅用于没有 HTTP header 等额外封装的 TCP 入站。
+                # 加密限制单独选择，避免启用网站时切断现有 none/CFB 客户端。
+                echo -e "${yellow}提示：VMess 的伪装网站需面板传输协议为 tcp，且未配置 HTTP header；TLS 需在面板开启并同步客户端订阅${plain}"
+                require_encryption=false
+                if [[ "$certmode" == "none" ]]; then
+                    read -rp "是否拒绝 none/aes-128-cfb 客户端？只允许 auto 等认证加密，旧客户端需改配置（回车默认 n）(y/n)：" encryption_choice
+                    if [[ "$encryption_choice" =~ ^[Yy]$ ]]; then
+                        require_encryption=true
+                    fi
+                fi
                 harden_config+='
             "VMessConfig": {
-                "RequireEncryption": true,
+                "RequireEncryption": '"$require_encryption"',
+                "HandshakeTimeout": 30,
                 "TrafficShaping": {
                     "Enable": true
                 }
@@ -200,8 +209,8 @@ EOF
             "SendIP": "0.0.0.0",
             "DeviceOnlineMinTraffic": 200,
             "MinReportTraffic": 0,
-            "TCPFastOpen": $fastopen,
-            "SniffEnabled": true,$harden_config
+            "EnableTFO": $fastopen,
+            "EnableSniff": true,$harden_config
             "CertConfig": {
                 "CertMode": "$certmode",
                 "RejectUnknownSni": $reject_sni,
