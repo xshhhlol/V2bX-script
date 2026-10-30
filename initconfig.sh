@@ -83,7 +83,9 @@ add_node_config() {
         istls="y"
     fi
 
-    if [[ "$isreality" != "y" && "$isreality" != "Y" &&  "$istls" != "y" ]]; then
+    # 原生 SS 入站不使用这里的 TLS 证书配置；询问会让用户误以为
+    # 申请证书后客户端就自动有 TLS 封装。
+    if [[ "$NodeType" != "shadowsocks" && "$isreality" != "y" && "$isreality" != "Y" && "$istls" != "y" ]]; then
         read -rp "请选择是否进行TLS配置？(y/n)" istls
     fi
 
@@ -157,6 +159,65 @@ add_node_config() {
             },'
             fi
         fi
+    fi
+    if [[ "$core_sing" == true && "$NodeType" == "shadowsocks" ]]; then
+        local ss_options="" ss_mux="" ss_tcp_choice="" ss_udp_choice=""
+        echo -e "\n${green}Shadowsocks 配置指引${plain}"
+        echo "面板里的加密方式、服务端口和服务端密钥由 V2bX 自动读取，无需在这里重复填写。"
+        echo ""
+        echo "面板这样填："
+        echo "  • 已有 aes-128-gcm 等普通 SS 节点：保持原加密方式，TCP 优化可用。"
+        echo "  • 2022-blake3-aes-128-gcm / 2022-blake3-aes-256-gcm：支持 TCP 优化和新的 UDP 填充。"
+        echo "    只有面板和使用的客户端都支持时才切换 SS2022；切换后需要更新客户端订阅。"
+        echo "    SS2022 的服务端密钥请在面板配置好，并与订阅一致，不要随意更换已有密钥。"
+        echo "  • 连接地址填写客户端能访问的域名或 IP。"
+        echo "  • 直连时，连接端口与服务端口保持一致；有中转或端口映射时分别填写外部入口和后端监听端口。"
+        echo "    防火墙放行服务端口的 TCP；需要原生 UDP 时，也要放行 UDP。"
+        echo "  • 本向导配置原生 SS，不需要申请 TLS 证书，面板“混淆”选“无/关闭”。"
+        echo "    已有插件或混淆的节点需保留配套服务端与客户端设置，不要只修改一侧。"
+        echo ""
+        echo "下面只设置服务端优化，不修改面板加密方式或客户端订阅。"
+        echo "这些优化需要 V2bX v1.4.2 或包含 SS 加固的更新版本；仅更新安装脚本不会生效。"
+        read -rp "开启 TCP 兼容优化？客户端无需调整，回车开启 [Y/n]：" ss_tcp_choice
+        if [[ ! "$ss_tcp_choice" =~ ^[Nn] ]]; then
+            ss_options='
+                "HandshakeTimeout": 30,
+                "TrafficShaping": { "Enable": true },'
+            ss_mux='
+            "MultiplexConfig": {
+                "Enable": true,
+                "Padding": false
+            },'
+            echo "  TCP：已加入配置，下行整形与 30 秒握手限制将在使用配套服务端后生效。"
+        else
+            echo "  TCP：保持原发送策略，不开启可选整形。"
+        fi
+        echo ""
+        echo "UDP 填充仅在面板实际使用 SS2022 时生效；aes-128-gcm 等普通 SS 会自动跳过。"
+        echo "填充会增加流量，可按需关闭；不会要求现有客户端增加私有配置。"
+        read -rp "为 SS2022 节点开启 UDP 小包填充？回车开启 [Y/n]：" ss_udp_choice
+        if [[ ! "$ss_udp_choice" =~ ^[Nn] ]]; then
+            ss_options+='
+                "UDPPadding": {
+                    "Enable": true,
+                    "MaxPacketSize": 1280,
+                    "MaxPaddingBytes": 256
+                },'
+            echo "  UDP：已加入自动适配开关；普通 SS 不会启用 SS2022 专属填充。"
+        else
+            echo "  UDP：保持原有策略，不开启新的小包填充。"
+        fi
+        if [[ -n "$ss_options" ]]; then
+            harden_config+='
+            "ShadowsocksConfig": {'"${ss_options%,}"'
+            },'"$ss_mux"
+        fi
+        if [[ -n "$ss_mux" ]]; then
+            echo "  复用：服务端已允许，普通客户端仍可照常连接，不强制客户端开启复用或填充。"
+        fi
+        echo "向导结束后会统一保存配置，无需手工编辑这些 JSON 选项。"
+        echo "已安装的节点可运行 V2bX generate 重新进入向导；生成前会备份原配置。"
+        echo ""
     fi
     ipv6_support=$(check_ipv6_support)
     listen_ip="0.0.0.0"
@@ -309,14 +370,12 @@ SITE
 }
 
 generate_config_file() {
-    echo -e "${yellow}V2bX 配置文件生成向导${plain}"
-    echo -e "${red}请阅读以下注意事项：${plain}"
-    echo -e "${red}1. 目前该功能正处测试阶段${plain}"
-    echo -e "${red}2. 生成的配置文件会保存到 /etc/V2bX/config.json${plain}"
-    echo -e "${red}3. 原来的配置文件会保存到 /etc/V2bX/config.json.bak${plain}"
-    echo -e "${red}4. 目前仅部分支持TLS${plain}"
-    echo -e "${red}5. 使用此功能生成的配置文件会自带审计，确定继续？(y/n)${plain}"
-    read -rp "请输入：" continue_prompt
+    echo -e "${green}V2bX 配置向导${plain}"
+    echo "请先在面板建好节点，准备面板地址、对接 API Key 和节点 ID。"
+    echo "按面板实际协议选择，向导会说明对应的证书要求和可选优化。"
+    echo "配置保存到 /etc/V2bX/config.json；原配置会备份到 config.json.bak。"
+    echo "生成的基础配置包含默认审计设置，完成后请核对配置再使用。"
+    read -rp "开始配置？回车继续 [Y/n]：" continue_prompt
     if [[ "$continue_prompt" =~ ^[Nn][Oo]? ]]; then
         exit 0
     fi

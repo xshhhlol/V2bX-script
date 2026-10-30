@@ -215,7 +215,8 @@ EOF
     if [[ ! -f /etc/V2bX/config.json ]]; then
         cp config.json /etc/V2bX/
         echo -e ""
-        echo -e "全新安装，请先参看教程：https://v2bx.v-50.me/，配置必要的内容"
+        echo -e "下一步：在面板建好节点，准备面板地址、API Key 和节点 ID，再按向导生成配置。"
+        echo -e "Shadowsocks 向导会说明加密方式、端口和 TCP/UDP 优化的适用范围。"
         first_install=true
     else
         if [[ x"${release}" == x"alpine" ]]; then
@@ -279,12 +280,14 @@ EOF
     curl -fsS --max-time 10 "https://api.v-50.me/counter_v2bx" || true
     # 首次安装询问是否生成配置文件
     if [[ $first_install == true ]]; then
-        read -rp "检测到你为第一次安装V2bX,是否自动直接生成配置文件？(y/n): " if_generate
+        read -rp "现在根据面板信息生成配置？回车暂不生成，也可稍后运行 V2bX generate [y/N]：" if_generate
         if [[ $if_generate == [Yy] ]]; then
             curl -o ./initconfig.sh -Ls https://raw.githubusercontent.com/xshhhlol/V2bX-script/master/initconfig.sh
             source initconfig.sh
             rm initconfig.sh -f
             generate_config_file
+        else
+            echo "准备好面板信息后，运行 V2bX generate，按提示完成配置即可。"
         fi
     fi
 }

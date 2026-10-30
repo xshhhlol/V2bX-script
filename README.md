@@ -44,3 +44,7 @@ bash build-vmess-local.sh
 输出为 `output/V2bX-linux-amd64` 和 SHA-256 校验文件。构建使用临时模块文件，不修改 V2bX 发布依赖，也不依赖开发机的 `go.work`。现有节点使用新二进制重启后，分段读取和重放修复自动生效；网站和整形仍由节点配置控制。
 
 本次修复、客户端验证范围及限制见 [VMess 兼容加固说明](docs/vmess-hardening.md)。
+
+SS / SS2022 的面板填写方法、兼容加固、本地构建方式和验证范围见 [Shadowsocks 加固说明](docs/shadowsocks-hardening.md)。首次安装时可选择生成配置；已有安装运行 `V2bX generate` 进入向导。选择 Shadowsocks 后会说明加密方式、端口和可选优化，原生 SS 不询问证书。
+
+已有 `aes-128-gcm` 节点可保持原算法，开启 TCP 优化。UDP 新填充只对 SS2022 生效，普通 SS 自动跳过；客户端不强制开启复用。本地构建使用 `bash build-ss-local.sh`，需要并列的 `V2bX`、`sing-box_mod`、`sing-shadowsocks`。已有配置需要添加说明中的 `ShadowsocksConfig` 才会开启可选整形/填充；SS 加固从 V2bX v1.4.2 起提供，已有节点可运行 `V2bX update v1.4.2` 更新服务端；仅更新脚本不会启用协议修复。
