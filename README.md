@@ -17,6 +17,19 @@ Find the source code here: [xshhhlol/V2bX](https://github.com/xshhhlol/V2bX)
 wget -N https://raw.githubusercontent.com/xshhhlol/V2bX-script/master/install.sh && bash install.sh
 ```
 
+# 默认 BT 拦截
+
+配置向导生成的 `/etc/V2bX/sing_origin.json` 默认先嗅探流量，再拒绝识别为 `bittorrent` 的连接，规则位于最终直连之前。所有使用该 sing 内核的 SS / SS2022、VMess、Trojan、AnyTLS、TUIC 和 Hy2 节点共用这些规则，客户端无需修改。
+
+V2bX 发布包的示例配置也包含这些规则，安装时仅在目标文件不存在且发布包附带该文件时复制；更新安装脚本不会自动改写已有配置。已有节点可在 `sing_origin.json` 的 `route.rules` 数组开头加入以下两条，保留后面的原有规则，然后运行 `V2bX restart`：
+
+```json
+{ "action": "sniff" },
+{ "protocol": ["bittorrent"], "action": "reject" }
+```
+
+重新运行 `V2bX generate` 也会生成这些规则，但会重写节点及辅助配置，有自定义规则时应先备份。独立 `hysteria2` 内核不加载此文件；加密或再次套隧道的 BT 可能无法识别，不能保证阻断全部 BT 流量。
+
 # 伪装网站与抗主动探测
 
 生成配置时，sing 内核的 Trojan / AnyTLS 节点（http、dns、self 证书模式）和 VMess 节点（有无 TLS 均可）会询问是否启用，回车即启用，不需要安装 nginx：

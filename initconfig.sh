@@ -601,6 +601,13 @@ EOF
   "route": {
     "rules": [
       {
+        "action": "sniff"
+      },
+      {
+        "protocol": ["bittorrent"],
+        "action": "reject"
+      },
+      {
         "ip_is_private": true,
         "action": "reject"
       },

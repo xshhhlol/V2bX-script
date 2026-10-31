@@ -212,6 +212,11 @@ EOF
         echo -e "${green}V2bX ${last_version}${plain} 安装完成，已设置开机自启"
     fi
 
+    # 新发布包附带 sing 配置；保留已有节点的自定义规则，兼容未附带该文件的旧发布包。
+    if [[ ! -f /etc/V2bX/sing_origin.json && -f sing_origin.json ]]; then
+        cp sing_origin.json /etc/V2bX/
+    fi
+
     if [[ ! -f /etc/V2bX/config.json ]]; then
         cp config.json /etc/V2bX/
         echo -e ""
