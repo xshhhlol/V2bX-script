@@ -349,8 +349,17 @@ prepare_external_web() (
     PATH="$PATH:/usr/sbin:/sbin"
     local binary=/usr/local/V2bX/V2bX
     local required_capability=${external_web_capability:-external-web-v1}
-    if ! "$binary" features 2>/dev/null | grep -qx "$required_capability"; then
+    local features
+    features=$("$binary" features 2>/dev/null) || {
+        echo "当前二进制不支持外部前端能力检查，请先更新到 v1.4.5 或包含修复的版本。"
+        return 1
+    }
+    if ! grep -qx "$required_capability" <<< "$features"; then
         echo "当前 V2bX 二进制不支持所选协议的完整外部前端，请先安装支持 $required_capability 的版本。"
+        return 1
+    fi
+    if ! grep -qx 'external-web-ubuntu-lts-v1' <<< "$features"; then
+        echo "当前二进制缺少 Ubuntu 22.04/24.04 外部前端兼容修复，请先更新到 v1.4.5 或包含该修复的版本。"
         return 1
     fi
     if command -v systemctl >/dev/null 2>&1; then
@@ -418,6 +427,74 @@ try:
 except (OSError, ValueError, KeyError, AssertionError):
     sys.exit(1)
 PY
+}
+
+external_web_failed() {
+    if python3 - <<'PY'
+import json, sys
+try:
+    state = json.load(open('/run/V2bX/external-web-ready.error.json'))
+    error = state.get('error')
+    if isinstance(error, str) and error:
+        print('外部前端启动错误：' + error[:4000])
+        sys.exit(0)
+except (OSError, ValueError, TypeError):
+    pass
+sys.exit(1)
+PY
+    then
+        return 0
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        local state
+        state=$(systemctl show V2bX -p SubState --value 2>/dev/null)
+        if [[ "$state" == auto-restart || "$state" == failed ]]; then
+            echo "V2bX 进程已经退出，无法完成外部前端启动。"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+external_web_service_running() {
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl is-active --quiet V2bX
+    else
+        service V2bX status >/dev/null 2>&1
+    fi
+}
+
+# Capture the failed attempt before restoring anything; the private directory
+# includes credentials/certificates and must never be made world-readable.
+rollback_external_web() {
+    v2bx stop
+    local failed_dir file
+    failed_dir=$(mktemp -d /etc/V2bX/failed-external.XXXXXX) || return 1
+    for file in "${web_files[@]}"; do
+        if [[ -f "/etc/V2bX/$file" ]]; then cp -p -- "/etc/V2bX/$file" "$failed_dir/" || return 1; fi
+    done
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -u V2bX --since "@$web_started_at" --no-pager > "$failed_dir/service.log" 2>&1 || true
+    fi
+    for file in "${web_files[@]}"; do
+        if [[ -f "$web_backup/$file" ]]; then
+            cp -p -- "$web_backup/$file" "/etc/V2bX/$file" || return 1
+        else
+            rm -f -- "/etc/V2bX/$file"
+        fi
+    done
+    echo "失败配置、证书和日志已保存在：$failed_dir"
+    if [[ "$web_was_running" == true ]]; then
+        echo "恢复先前正在运行的配置。"
+        v2bx restart
+        if ! external_web_service_running; then
+            v2bx stop
+            echo "旧配置也未能运行，已保持停止；请查看日志后再启动。"
+        fi
+    else
+        echo "此前没有运行中的服务，已恢复原文件并保持停止，不启动示例配置。"
+    fi
+    rm -rf -- "$web_backup"
 }
 
 # 生成伪装网站首页；已存在则保留，可自行替换 /etc/V2bX/www 下的文件
@@ -576,9 +653,10 @@ generate_config_file() {
     # 切换到配置文件目录
     cd /etc/V2bX
 
-    local web_backup=""
+    local web_backup="" web_was_running=false web_started_at=0
     local web_files=(config.json config.json.bak custom_outbound.json route.json sing_origin.json hy2config.yaml fullchain.cer cert.key)
     if [[ "$need_external_web" == true ]]; then
+        if external_web_service_running; then web_was_running=true; fi
         web_backup=$(mktemp -d /etc/V2bX/.web-rollback.XXXXXX) || return 1
         local web_file
         for web_file in "${web_files[@]}"; do
@@ -586,6 +664,7 @@ generate_config_file() {
         done
         # Avoid the config watcher reading a partially generated set of files.
         v2bx stop
+        rm -f /run/V2bX/external-web-ready.error.json
     fi
     
     # 备份旧的配置文件
@@ -801,11 +880,25 @@ masquerade:
   type: 404
 EOF
     echo -e "${green}V2bX 配置文件生成完成,正在重新启动服务${plain}"
-    v2bx restart
+    web_started_at=$(date +%s)
+    local web_launch_failed=false
+    if [[ "$need_external_web" == true ]]; then
+        # A systemd start job completing does not mean node initialization has
+        # finished. Print success only after the frontend readiness checks.
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl restart V2bX || web_launch_failed=true
+        else
+            service V2bX restart || web_launch_failed=true
+        fi
+    else
+        v2bx restart
+    fi
     if [[ "$need_external_web" == true ]]; then
         echo "等待外部前端和证书就绪（最多 120 秒）……"
         local web_wait web_ok=false
         for ((web_wait=0;web_wait<120;web_wait++)); do
+            if [[ "$web_launch_failed" == true ]]; then break; fi
+            if external_web_failed; then break; fi
             if external_web_ready; then
                 sleep 2
                 if external_web_ready; then web_ok=true; break; fi
@@ -813,17 +906,8 @@ EOF
             sleep 1
         done
         if [[ "$web_ok" != true ]]; then
-            echo "外部前端启动失败，恢复原配置和证书。详细原因请查看 V2bX 日志。"
-            v2bx stop
-            for web_file in "${web_files[@]}"; do
-                if [[ -f "$web_backup/$web_file" ]]; then
-                    cp -p -- "$web_backup/$web_file" "/etc/V2bX/$web_file"
-                else
-                    rm -f -- "/etc/V2bX/$web_file"
-                fi
-            done
-            v2bx restart
-            rm -rf -- "$web_backup"
+            echo "外部前端启动失败，保留失败现场并恢复原配置。"
+            rollback_external_web || echo "自动恢复未完成，请保留备份目录：$web_backup"
             return 1
         fi
         rm -rf -- "$web_backup"

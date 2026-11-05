@@ -12,10 +12,10 @@ PREPARE = SOURCE[SOURCE.index("prepare_external_web() ("):SOURCE.index("\n# A ro
 
 
 class ExternalWebPreflightTests(unittest.TestCase):
-    def run_preflight(self, capability=True, service_enabled=False, required="external-web-v1"):
+    def run_preflight(self, capability=True, service_enabled=False, required="external-web-v1", lts_compatible=True):
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / "V2bX"
-            binary.write_text("#!/bin/sh\n" + ("echo external-web-v1\n" if capability else "exit 1\n"))
+            binary.write_text("#!/bin/sh\n" + ("echo external-web-v1\n" + ("echo external-web-ubuntu-lts-v1\n" if lts_compatible else "") if capability else "exit 1\n"))
             binary.chmod(0o755)
             source = PREPARE.replace("local binary=/usr/local/V2bX/V2bX", "local binary=" + shlex.quote(str(binary)))
             # All dependencies are represented by functions, so apt/service
@@ -33,8 +33,12 @@ apt-get() { echo unexpected-package-install >&2; return 99; }
     def test_old_binary_is_rejected_before_installing(self):
         result = self.run_preflight(capability=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("external-web-v1", result.stdout)
         self.assertNotIn("unexpected-package-install", result.stderr)
+
+    def test_old_external_binary_is_rejected_before_changing_config(self):
+        result=self.run_preflight(lts_compatible=False)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn("v1.4.5",result.stdout)
 
     def test_existing_system_service_is_preserved(self):
         result = self.run_preflight(service_enabled=True)
