@@ -69,6 +69,69 @@ class VMessConfigTests(unittest.TestCase):
         self.assertNotIn("FallBackSite", node)
 
 
+class TrojanWebModeTests(unittest.TestCase):
+    def test_builtin_remains_default(self):
+        node = generate("1", "7", "6", "y", "1", "node.example", "", "")
+        self.assertTrue(node["FallBackSite"]["Enable"])
+        self.assertNotIn("ExternalWeb", node)
+        self.assertEqual(node["ListenIP"], "0.0.0.0")
+
+    def test_external_keeps_public_address_and_certificate_settings(self):
+        node = generate("1", "7", "6", "y", "1", "node.example", "", "2")
+        self.assertTrue(node["ExternalWeb"]["Enable"])
+        self.assertTrue(node["CertConfig"]["RejectUnknownSni"])
+        self.assertEqual(node["CertConfig"]["CertMode"], "http")
+        self.assertEqual(node["ListenIP"], "0.0.0.0")
+        self.assertEqual(node["FallBackSite"]["Root"], "/etc/V2bX/www")
+
+    def test_plain_trojan_never_enables_external_tls(self):
+        node = generate("1", "7", "6", "n")
+        self.assertNotIn("ExternalWeb", node)
+
+    def test_declining_website_does_not_offer_external_mode(self):
+        node,messages=generate("1","7","6","y","1","node.example","n",with_messages=True)
+        self.assertNotIn("ExternalWeb",node)
+        self.assertNotIn("FallBackSite",node)
+        self.assertNotIn("HTTPS 网站模式",messages)
+
+
+class SharedHTTPSWebModeTests(unittest.TestCase):
+    def test_vmess_https_external_is_selected_after_website_opt_in(self):
+        node,messages=generate("1","7","3","y","1","node.example","y","2",with_messages=True)
+        self.assertTrue(node["ExternalWeb"]["Enable"])
+        self.assertTrue(node["FallBackSite"]["Enable"])
+        self.assertFalse(node["VMessConfig"]["RequireEncryption"])
+        self.assertTrue(node["VMessConfig"]["TrafficShaping"]["Enable"])
+        self.assertIn("VMess TCP+TLS",messages)
+
+    def test_vmess_https_builtin_and_disabled_website(self):
+        node=generate("1","7","3","y","1","node.example","y","1")
+        self.assertNotIn("ExternalWeb",node)
+        node,messages=generate("1","7","3","y","1","node.example","n",with_messages=True)
+        self.assertNotIn("ExternalWeb",node)
+        self.assertNotIn("HTTPS 网站模式",messages)
+
+    def test_plain_vmess_only_offers_original_builtin_site(self):
+        node,messages=generate("1","7","3","n","y","n",with_messages=True)
+        self.assertNotIn("ExternalWeb",node)
+        self.assertFalse(node["FallBackSite"]["RedirectHTTP"])
+        self.assertNotIn("HTTPS 网站模式",messages)
+
+    def test_anytls_external_preserves_shaping(self):
+        node=generate("1","7","8","1","node.example","y","2")
+        self.assertTrue(node["ExternalWeb"]["Enable"])
+        self.assertTrue(node["FallBackSite"]["Enable"])
+        self.assertTrue(node["AnyTLSConfig"]["TrafficShaping"]["Enable"])
+
+    def test_anytls_builtin_default_and_disabled_site(self):
+        node=generate("1","7","8","1","node.example","","")
+        self.assertNotIn("ExternalWeb",node)
+        self.assertTrue(node["FallBackSite"]["Enable"])
+        node,messages=generate("1","7","8","1","node.example","n",with_messages=True)
+        self.assertNotIn("ExternalWeb",node)
+        self.assertNotIn("HTTPS 网站模式",messages)
+
+
 class ShadowsocksConfigTests(unittest.TestCase):
     def test_tcp_defaults_preserve_ordinary_clients(self):
         node = generate("1", "7", "1", "", "")

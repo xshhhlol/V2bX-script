@@ -36,6 +36,7 @@ V2bX 发布包的示例配置也包含这些规则，安装时仅在目标文件
 
 - 未通过认证的连接（探测、浏览器访问）由 V2bX 内置的网站响应，支持 HTTP/2 和 HTTP/1.1
 - 网站文件在 `/etc/V2bX/www`，首次生成时随机创建首页，可直接替换成自己的静态网站
+- Trojan、VMess、AnyTLS 启用 HTTPS 网站伪装后，可继续选择“原有内置”或“完整外部前端”：脚本自动准备 HAProxy、nginx 和 Python 3；V2bX 管理其私有配置、启动停止和证书重载，无需另写 Web 配置。外部模式支持 Trojan TCP+TLS、VMess TCP+TLS（无 HTTP header）及原生 AnyTLS；HAProxy/OpenSSL 接管公网 TLS，nginx 处理 HTTP/1.1、HTTP/2 和 ACME 转发，V2bX 只在回环地址接收认证与代理流量，保留原始客户端 IP 和 ALPN。默认仍为内置模式，不增加依赖。参见[外部前端说明](docs/external-web.md)。
 - http / dns 证书模式下拒绝 SNI 与证书域名不匹配的握手；如果面板里节点地址填的是 IP，需要把 server_name 填成证书域名
 - 80 端口跳转到 https；http 模式申请和续签证书由同一个 80 端口服务响应，互不冲突
 - AnyTLS 节点额外开启服务端流量整形，不需要面板或客户端改动

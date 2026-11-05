@@ -110,9 +110,27 @@ add_node_config() {
     # trojan/anytls 的 TLS 节点、vmess 节点（有无 TLS 均可）：未通过认证的连接回落到 V2bX 内置的伪装网站
     reject_sni=false
     harden_config=""
+    external_web=false
     if [[ "$core_sing" == true && ( ( "$certmode" != "none" && ( "$NodeType" == "trojan" || "$NodeType" == "anytls" ) ) || "$NodeType" == "vmess" ) ]]; then
-        read -rp "是否启用伪装网站和抗主动探测？无需安装 nginx（推荐，回车默认 y）(y/n)：" harden_choice
+        read -rp "是否启用网站伪装？默认使用内置网站（回车默认 y）(y/n)：" harden_choice
         if [[ ! "$harden_choice" =~ ^[Nn] ]]; then
+            if [[ "$core_type" == "2" && "$certmode" != "none" ]]; then
+                echo "HTTPS 网站模式：1. 原有内置（默认，无额外依赖） 2. 完整外部前端（HAProxy/OpenSSL + nginx，自动安装与管理）"
+                echo "外部模式支持 Trojan TCP+TLS、VMess TCP+TLS（无 HTTP header）和原生 AnyTLS；地址、端口和客户端设置不变。WS/gRPC 请用内置模式。"
+                while true; do
+                    read -rp "请选择 [1/2，默认 1]：" web_mode
+                    case "$web_mode" in
+                        ""|1) break ;;
+                        2)
+                            external_web=true
+                            need_external_web=true
+                            external_web_count=$((${external_web_count:-0}+1))
+                            if [[ "$NodeType" != "trojan" ]]; then external_web_capability=external-web-v2; fi
+                            break ;;
+                        *) echo "请输入 1 或 2。" ;;
+                    esac
+                done
+            fi
             need_fallback_site=true
             # 只有正规证书才拒绝未知 SNI，自签证书的客户端可能不带 SNI
             if [[ "$certmode" == "http" || "$certmode" == "dns" ]]; then
@@ -130,6 +148,10 @@ add_node_config() {
                 "Root": "/etc/V2bX/www",
                 "RedirectHTTP": '"$redirect_http"'
             },'
+            if [[ "$external_web" == true ]]; then
+                harden_config+='
+            "ExternalWeb": {"Enable": true},'
+            fi
             if [[ "$NodeType" == "vmess" ]]; then
                 # 网站仅用于没有 HTTP header 等额外封装的 TCP 入站。
                 # 加密限制单独选择，避免启用网站时切断现有 none/CFB 客户端。
@@ -320,6 +342,84 @@ EOF
     nodes_config+=("$node_config")
 }
 
+# Optional dependencies are installed without enabling distribution services:
+# V2bX supervises its own private configs and processes. Refuse to displace an
+# existing host web server, including one started automatically by a package.
+prepare_external_web() (
+    PATH="$PATH:/usr/sbin:/sbin"
+    local binary=/usr/local/V2bX/V2bX
+    local required_capability=${external_web_capability:-external-web-v1}
+    if ! "$binary" features 2>/dev/null | grep -qx "$required_capability"; then
+        echo "当前 V2bX 二进制不支持所选协议的完整外部前端，请先安装支持 $required_capability 的版本。"
+        return 1
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet nginx || systemctl is-active --quiet haproxy || systemctl is-enabled --quiet nginx || systemctl is-enabled --quiet haproxy; then
+            echo "检测到正在运行或已启用的系统 nginx/HAProxy，保留现有服务，请先处理端口归属后再选择外部模式。"
+            return 1
+        fi
+    elif command -v rc-service >/dev/null 2>&1; then
+        if rc-service nginx status >/dev/null 2>&1 || rc-service haproxy status >/dev/null 2>&1; then
+            echo "检测到现有 Web 服务，未修改其配置。"
+            return 1
+        fi
+    fi
+    if command -v nginx >/dev/null 2>&1 && command -v haproxy >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+    # Debian packages may auto-start services. A temporary policy prevents
+    # that; preserve any administrator-owned policy-rc.d without overwriting it.
+    local policy_created=false status=0
+    trap 'if [[ "$policy_created" == true ]]; then rm -f /usr/sbin/policy-rc.d; fi' EXIT
+    if command -v apt-get >/dev/null 2>&1; then
+        if [[ ! -e /usr/sbin/policy-rc.d && ! -L /usr/sbin/policy-rc.d ]]; then
+            printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+            chmod 755 /usr/sbin/policy-rc.d
+            policy_created=true
+        fi
+        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y nginx haproxy python3 || status=$?
+        if [[ "$policy_created" == true ]]; then rm -f /usr/sbin/policy-rc.d; fi
+    elif command -v apk >/dev/null 2>&1; then
+        apk add nginx haproxy python3 || status=$?
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y nginx haproxy python3 || status=$?
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y nginx haproxy python3 || status=$?
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -S --needed --noconfirm nginx haproxy python || status=$?
+    else
+        echo "未找到支持的包管理器；请安装 nginx、haproxy、python3 后重试。"
+        return 1
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now nginx haproxy >/dev/null 2>&1 || true
+    fi
+    if [[ "$status" != 0 ]]; then return "$status"; fi
+    command -v nginx >/dev/null && command -v haproxy >/dev/null && command -v python3 >/dev/null
+)
+
+# A root-owned readiness marker is published only after both frontends listen.
+# Match the service PID and the requested number of external nodes to avoid
+# accepting a marker left by an older process or only the first of many nodes.
+external_web_ready() {
+    local expected_pid
+    if command -v systemctl >/dev/null 2>&1; then
+        expected_pid=$(systemctl show V2bX -p MainPID --value 2>/dev/null)
+    else
+        expected_pid=$(cat /run/V2bX.pid 2>/dev/null)
+    fi
+    python3 - "$expected_pid" "$external_web_count" <<'PY'
+import json, os, sys
+try:
+    state = json.load(open('/run/V2bX/external-web-ready.json'))
+    pid, count = int(sys.argv[1]), int(sys.argv[2])
+    assert pid > 0 and state['pid'] == pid and state['nodes'] == count
+    os.kill(pid, 0)
+except (OSError, ValueError, KeyError, AssertionError):
+    sys.exit(1)
+PY
+}
+
 # 生成伪装网站首页；已存在则保留，可自行替换 /etc/V2bX/www 下的文件
 generate_fallback_site() {
     local site_dir=/etc/V2bX/www
@@ -386,6 +486,9 @@ generate_config_file() {
     core_sing=false
     core_hysteria2=false
     need_fallback_site=false
+    need_external_web=false
+    external_web_count=0
+    external_web_capability=external-web-v1
     fixed_api_info=false
     check_api=false
     
@@ -411,6 +514,14 @@ generate_config_file() {
             add_node_config
         fi
     done
+
+    # Dependency and binary checks precede any changes to the active config.
+    if [[ "$need_external_web" == true ]]; then
+        if ! prepare_external_web; then
+            echo "外部模式准备失败，已有节点配置未改动。"
+            return 1
+        fi
+    fi
 
     # 初始化核心配置数组
     cores_config="["
@@ -464,6 +575,18 @@ generate_config_file() {
 
     # 切换到配置文件目录
     cd /etc/V2bX
+
+    local web_backup=""
+    local web_files=(config.json config.json.bak custom_outbound.json route.json sing_origin.json hy2config.yaml fullchain.cer cert.key)
+    if [[ "$need_external_web" == true ]]; then
+        web_backup=$(mktemp -d /etc/V2bX/.web-rollback.XXXXXX) || return 1
+        local web_file
+        for web_file in "${web_files[@]}"; do
+            if [[ -f "$web_file" ]]; then cp -p -- "$web_file" "$web_backup/" || return 1; fi
+        done
+        # Avoid the config watcher reading a partially generated set of files.
+        v2bx stop
+    fi
     
     # 备份旧的配置文件
     mv config.json config.json.bak
@@ -679,4 +802,31 @@ masquerade:
 EOF
     echo -e "${green}V2bX 配置文件生成完成,正在重新启动服务${plain}"
     v2bx restart
+    if [[ "$need_external_web" == true ]]; then
+        echo "等待外部前端和证书就绪（最多 120 秒）……"
+        local web_wait web_ok=false
+        for ((web_wait=0;web_wait<120;web_wait++)); do
+            if external_web_ready; then
+                sleep 2
+                if external_web_ready; then web_ok=true; break; fi
+            fi
+            sleep 1
+        done
+        if [[ "$web_ok" != true ]]; then
+            echo "外部前端启动失败，恢复原配置和证书。详细原因请查看 V2bX 日志。"
+            v2bx stop
+            for web_file in "${web_files[@]}"; do
+                if [[ -f "$web_backup/$web_file" ]]; then
+                    cp -p -- "$web_backup/$web_file" "/etc/V2bX/$web_file"
+                else
+                    rm -f -- "/etc/V2bX/$web_file"
+                fi
+            done
+            v2bx restart
+            rm -rf -- "$web_backup"
+            return 1
+        fi
+        rm -rf -- "$web_backup"
+        echo "外部前端已就绪；以后仍使用 V2bX start/stop/restart 管理。"
+    fi
 }
