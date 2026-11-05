@@ -146,6 +146,89 @@ config() {
     esac
 }
 
+external_web_package_inventory() {
+    command -v dpkg-query >/dev/null 2>&1 || return 0
+    LC_ALL=C dpkg-query -W -f='${binary:Package}\t${db:Status-Status}\n' 'nginx*' 'libnginx-mod-*' haproxy 2>/dev/null |
+        awk '$2 == "installed" {sub(/:.*/, "", $1); if ($1 == "haproxy" || $1 ~ /^nginx($|-)/ || $1 ~ /^libnginx-mod-/) print $1}' | LC_ALL=C sort -u
+}
+
+uninstall_external_web_packages() {
+    local state=/var/lib/V2bX-script/external-packages
+    if ! command -v apt-get >/dev/null 2>&1 || ! command -v dpkg-query >/dev/null 2>&1; then
+        echo "当前系统暂不自动移除 Web 软件包；保留 nginx、HAProxy 和 Python。"
+        return 0
+    fi
+    local installed package family answer plan line remaining temporary
+    local keep_nginx=false keep_haproxy=false
+    local owned=() unknown=() remove=()
+    installed=$(external_web_package_inventory)
+    [[ -z "$installed" ]] && return 0
+    # Do not remove a Web service which the administrator has since enabled
+    # or started independently of V2bX's private child processes.
+    if command -v systemctl >/dev/null 2>&1; then
+        for family in nginx haproxy; do
+            if systemctl is-active --quiet "$family" || systemctl is-enabled --quiet "$family"; then
+                echo "系统 $family 服务正在运行或已启用，保留该组件。"
+                if [[ "$family" == nginx ]]; then keep_nginx=true; else keep_haproxy=true; fi
+            fi
+        done
+    fi
+    while IFS= read -r package; do
+        [[ -z "$package" ]] && continue
+        if [[ "$package" == haproxy ]]; then
+            [[ "$keep_haproxy" == true ]] && continue
+        else
+            [[ "$keep_nginx" == true ]] && continue
+        fi
+        if [[ -f "$state" ]] && grep -Fxq "$package" "$state"; then owned+=("$package"); else unknown+=("$package"); fi
+    done <<< "$installed"
+    if [[ ${#owned[@]} -gt 0 ]]; then
+        echo "本脚本安装记录中的 Web 软件包：${owned[*]}"
+        read -rp "是否同时卸载这些 nginx/HAProxy 组件？Python 保留 [y/N]：" answer || answer=n
+        case "$answer" in y|Y|yes|YES) remove+=("${owned[@]}") ;; esac
+    fi
+    if [[ ${#unknown[@]} -gt 0 ]]; then
+        echo "以下 Web 软件包没有本脚本安装记录，可能是原有软件或旧版脚本安装：${unknown[*]}"
+        read -rp "无法确认来源，是否仍明确卸载上述组件？默认保留，Python 保留 [y/N]：" answer || answer=n
+        case "$answer" in y|Y|yes|YES) remove+=("${unknown[@]}") ;; esac
+    fi
+    [[ ${#remove[@]} -eq 0 ]] && return 0
+    # Simulate first. Never autoremove Python/shared dependencies or approve
+    # removal of any reverse dependency outside the explicitly selected set.
+    if ! plan=$(LC_ALL=C apt-get -s -o APT::Get::AutomaticRemove=false remove -- "${remove[@]}" 2>&1); then
+        echo "软件包卸载预检查失败，未移除组件：$plan"
+        return 1
+    fi
+    while IFS= read -r line; do
+        case "$line" in
+            'Remv '*)
+                package=${line#Remv }; package=${package%% *}; package=${package%%:*}
+                if ! printf '%s\n' "${remove[@]}" | grep -Fxq "$package"; then
+                    echo "卸载会额外删除 ${package}，已取消 Web 组件卸载。"
+                    return 1
+                fi ;;
+            'Inst '*|'Conf '*)
+                echo "卸载计划还涉及安装或配置其他软件，已取消 Web 组件卸载。"
+                return 1 ;;
+        esac
+    done <<< "$plan"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get -y -o APT::Get::AutomaticRemove=false remove -- "${remove[@]}"; then
+        echo "Web 组件卸载未完成，保留安装记录以便重试。"
+        return 1
+    fi
+    if [[ -f "$state" ]]; then
+        remaining=$(external_web_package_inventory)
+        temporary=$(mktemp "${state}.XXXXXX") || return 1
+        chmod 600 "$temporary"
+        while IFS= read -r package; do
+            if [[ -n "$package" ]] && grep -Fxq "$package" <<< "$remaining"; then printf '%s\n' "$package" >> "$temporary"; fi
+        done < "$state"
+        mv -f -- "$temporary" "$state"
+        if [[ ! -s "$state" ]]; then rm -f -- "$state"; rmdir "$(dirname "$state")" 2>/dev/null || true; fi
+    fi
+    echo "选定的 Web 组件已卸载；Python、共享依赖和系统 Web 配置未自动清除。"
+}
+
 uninstall() {
     confirm "确定要卸载 V2bX 吗?" "n"
     if [[ $? != 0 ]]; then
@@ -168,6 +251,9 @@ uninstall() {
         systemctl daemon-reload
         systemctl reset-failed
     fi
+    uninstall_external_web_packages || echo "Web 组件保留；继续卸载 V2bX。"
+    rm /run/V2bX/external-web-ready.json /run/V2bX/external-web-ready.error.json -f
+    rmdir /run/V2bX 2>/dev/null || true
     rm /etc/V2bX/ -rf
     rm /usr/local/V2bX/ -rf
     # 网络优化的参数文件，重启后内核参数恢复系统默认

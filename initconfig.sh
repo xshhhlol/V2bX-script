@@ -342,6 +342,36 @@ EOF
     nodes_config+=("$node_config")
 }
 
+# Inventory package names, not executable paths: Ubuntu's nginx metapackage
+# can leave nginx-core/common and modules installed when removed by itself.
+external_web_package_inventory() {
+    command -v dpkg-query >/dev/null 2>&1 || return 0
+    LC_ALL=C dpkg-query -W -f='${binary:Package}\t${db:Status-Status}\n' 'nginx*' 'libnginx-mod-*' haproxy 2>/dev/null |
+        awk '$2 == "installed" {sub(/:.*/, "", $1); if ($1 == "haproxy" || $1 ~ /^nginx($|-)/ || $1 ~ /^libnginx-mod-/) print $1}' | LC_ALL=C sort -u
+}
+
+record_external_web_packages() (
+    command -v apt-get >/dev/null 2>&1 || return 0
+    command -v dpkg-query >/dev/null 2>&1 || return 0
+    umask 077
+    local state=/var/lib/V2bX-script/external-packages
+    local before=$1 after package temporary
+    after=$(external_web_package_inventory)
+    mkdir -p "$(dirname "$state")" || return 1
+    temporary=$(mktemp "${state}.XXXXXX") || return 1
+    if [[ -f "$state" ]]; then
+        while IFS= read -r package; do
+            case "$package" in nginx|nginx-*|libnginx-mod-*|haproxy) printf '%s\n' "$package" ;; esac
+        done < "$state" >> "$temporary"
+    fi
+    while IFS= read -r package; do
+        [[ -z "$package" ]] && continue
+        if ! grep -Fxq "$package" <<< "$before"; then printf '%s\n' "$package" >> "$temporary"; fi
+    done <<< "$after"
+    LC_ALL=C sort -u "$temporary" -o "$temporary"
+    mv -f -- "$temporary" "$state"
+)
+
 # Optional dependencies are installed without enabling distribution services:
 # V2bX supervises its own private configs and processes. Refuse to displace an
 # existing host web server, including one started automatically by a package.
@@ -376,6 +406,8 @@ prepare_external_web() (
     if command -v nginx >/dev/null 2>&1 && command -v haproxy >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
         return 0
     fi
+    local packages_before
+    packages_before=$(external_web_package_inventory)
     # Debian packages may auto-start services. A temporary policy prevents
     # that; preserve any administrator-owned policy-rc.d without overwriting it.
     local policy_created=false status=0
@@ -400,6 +432,9 @@ prepare_external_web() (
         echo "未找到支持的包管理器；请安装 nginx、haproxy、python3 后重试。"
         return 1
     fi
+    # Record actual additions even if apt only partially completed. Python
+    # is deliberately excluded, and records survive normal V2bX uninstall.
+    record_external_web_packages "$packages_before" || echo "注意：无法保存 Web 依赖安装记录，卸载时将按来源不明处理。"
     if command -v systemctl >/dev/null 2>&1; then
         systemctl disable --now nginx haproxy >/dev/null 2>&1 || true
     fi
