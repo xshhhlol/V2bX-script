@@ -61,3 +61,14 @@ bash build-vmess-local.sh
 SS / SS2022 的面板填写方法、兼容加固、本地构建方式和验证范围见 [Shadowsocks 加固说明](docs/shadowsocks-hardening.md)。首次安装时可选择生成配置；已有安装运行 `V2bX generate` 进入向导。选择 Shadowsocks 后会说明加密方式、端口和可选优化，原生 SS 不询问证书。
 
 已有 `aes-128-gcm` 节点可保持原算法，开启 TCP 优化。UDP 新填充只对 SS2022 生效，普通 SS 自动跳过；客户端不强制开启复用。本地构建使用 `bash build-ss-local.sh`，需要并列的 `V2bX`、`sing-box_mod`、`sing-shadowsocks`。已有配置需要添加说明中的 `ShadowsocksConfig` 才会开启可选整形/填充；SS 加固从 V2bX v1.4.2 起提供，已有节点可运行 `V2bX update v1.4.2` 更新服务端；仅更新脚本不会启用协议修复。
+
+# Trojan 修复与加固
+
+从 V2bX v1.4.3 起提供。只改服务端，客户端和面板设置都不用改。已有节点运行 `V2bX update v1.4.3` 更新服务端；只更新管理脚本不会生效。
+
+- 修复：v1.3.x 起，面板传输协议为 ws、grpc、h2 的 Trojan 节点，每个连接都会被断开，日志显示 `set handshake deadline: invalid argument`。tcp 和 httpupgrade 节点不受影响
+- 伪装网站沿用连接开始时的请求头期限（30 秒），不再重新计时。探测无论何时打破 Trojan 格式，都不会多拿一轮等待。浏览器发完请求头后，长连接和上传由网站自己的超时控制
+- 请求头和 UDP 帧里的分隔符严格校验，格式不对的请求直接拒绝
+- 删除用户时，该用户的 UDP 连接（如游戏、语音）也会断开，此前只断开 TCP
+- 每个节点同时转交给伪装网站的连接最多 1024 个，超出直接关闭，不影响已认证用户。内置网站加了 2 分钟写入超时
+- 扫描造成的握手失败日志每分钟只记一条 error，其余降为 debug；日志级别设为 debug 时仍可看到每一条
