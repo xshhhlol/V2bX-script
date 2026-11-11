@@ -7,6 +7,7 @@ task_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 task_source_parent=${1:-$(dirname -- "$task_script_dir")}
 task_server_dir=$(cd -- "$task_source_parent/V2bX" && pwd)
 task_vmess_dir=$(cd -- "$task_source_parent/sing-vmess" && pwd)
+task_box_dir=$(cd -- "$task_source_parent/sing-box_mod" && pwd)
 task_target_os=${GOOS:-linux}
 task_target_arch=${GOARCH:-amd64}
 task_output=${2:-$task_script_dir/output/V2bX-$task_target_os-$task_target_arch}
@@ -25,7 +26,8 @@ mkdir -p -- "$(dirname -- "$task_output")"
 
 cd -- "$task_server_dir"
 GOWORK=off go mod edit -modfile "$task_build_dir/local.mod" \
-    -replace "github.com/sagernet/sing-vmess=$task_vmess_dir"
+    -replace "github.com/sagernet/sing-vmess=$task_vmess_dir" \
+    -replace "github.com/sagernet/sing-box=$task_box_dir"
 printf 'Building V2bX for %s/%s with local sing-vmess: %s\n' \
     "$task_target_os" "$task_target_arch" "$task_vmess_dir"
 GOWORK=off GOOS="$task_target_os" GOARCH="$task_target_arch" CGO_ENABLED=0 \

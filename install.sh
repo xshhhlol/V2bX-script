@@ -128,7 +128,7 @@ install_V2bX() {
         auto_version=true
         last_version=$(curl -fsS --connect-timeout 10 --max-time 30 "https://api.github.com/repos/xshhhlol/V2bX/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
         if [[ -z "$last_version" ]]; then
-            echo "无法查询最新稳定版本，请检查网络，或运行 V2bX update v1.4.8 指定版本。"
+            echo "无法查询最新稳定版本，请检查网络，或运行 V2bX update v1.4.9 指定版本。"
             return 1
         fi
     else
@@ -136,7 +136,7 @@ install_V2bX() {
         if [[ "$last_version" != v* ]]; then last_version="v$last_version"; fi
     fi
     if [[ ! "$last_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
-        echo "版本号无效，请填写类似 v1.4.8 的版本号。"
+        echo "版本号无效，请填写类似 v1.4.9 的版本号。"
         return 1
     fi
     if [[ "$auto_version" == true && -x /usr/local/V2bX/V2bX ]]; then

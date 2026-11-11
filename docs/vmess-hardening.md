@@ -43,3 +43,36 @@
 V2bX v1.4.1 起已锁定包含这些修复的 sing-vmess 远程模块版本。已有节点可使用 `V2bX update v1.4.1` 更新服务端；新安装使用对应版本的发布包。更新并重启后，协议读取和重放修复会自动生效，网站及整形仍由配置控制。仅更新管理脚本不会替换服务端协议实现。
 
 裸 VMess 随机首包、上行握手及流量方向/时序无法仅靠这些服务端改动消除。下行整形属于有限扰动，不能据此保证不可识别。
+
+## 本地兼容增强（2026-11-11）
+
+v1.4.9 发布的兼容增强（2026-11-11），作用于 sing-box 内核使用的 `sing-vmess`；客户端配置和协议格式不变。
+
+开启 `VMessConfig.TrafficShaping.Enable` 后，TCP 与 VMess Mux 使用随机分块，UDP 在编码完成后拆分底层写入，保留完整数据报。后续新 Mux 流与空闲至少 500ms 后的写入可以重新开启窗口；每连接最多八个窗口、`8*MaxRecords` 次实际拆分，避免无限增加写调用。小响应不消耗拆分预算，但长度仍可能暴露。
+
+服务端串行处理并发写入。握手取消与超时在不支持读期限的传输上也会终止读取；这些传输在超时后关闭当前流，不能继续网站回落。成功认证后撤销临时中断。没有增加发送延迟、空闲流量或非标准填充。
+
+同时修复 `sing-box_mod` 的 gRPC 服务端关闭链路：关闭当前流会让对应 RPC 返回，从而解除阻塞的 `Recv()`。不关闭共享的 HTTP/2 连接。构建时需要同时包含本地协议库和本地 sing-box 改动。
+
+## Build the local changes
+
+增强代码位于同级 `sing-vmess` 和 `sing-box_mod` 源码目录。正式安装使用 v1.4.9 发布包中固定的新依赖，原一键安装命令和 `V2bX update v1.4.9` 均可使用。开发者也可用构建脚本临时指向这两处本地源码，不修改正式依赖：
+
+```sh
+GOOS=linux GOARCH=amd64 ./build-vmess-local.sh .. output/V2bX-vmess-linux-amd64
+GOOS=linux GOARCH=arm64 ./build-vmess-local.sh .. output/V2bX-vmess-linux-arm64
+```
+
+构建还需要 V2bX 当前 `go.mod` 指定的 Go 工具链。产物附带 SHA-256 文件。此处只构建 sing 内核；不改变 Xray 实现，也不自动部署。
+
+## Limits
+
+协议回归与 Xray 客户端编码互操作可以验证字节流、数据报和认证兼容性，不能证明所有闭源客户端都经过验证，也不能证明 DPI 识别率下降。TLS 外观、客户端上行、嵌套握手、短响应长度与业务时序仍需实测。没有外层 TLS 的 VMess 随机密文首包保持原样。
+
+## 本次验证结果
+
+- sing-vmess 全包 race 测试通过，包括 AEAD/alterId Mux、UDP 完整性、并发写入及握手取消/超时。
+- Xray v26.3.27 与 v26.11.9 客户端编码矩阵分别通过 race 测试，覆盖 TCP、UDP 和同连接多 Mux 流。新版上游已删除 none/zero，其矩阵只测试仍支持的方式；旧版矩阵保留 none/zero，服务端没有移除旧客户端支持。
+- sing-box gRPC 真实传输测试通过；V2bX 的 `core/sing`、`common/externalweb`、`common/webpage`、`common/port80` 全部通过 race 测试，包括超时关闭单个 gRPC 流后继续建立合法连接。
+- 脚本仓库 53 项测试通过。Linux amd64/arm64 产物使用 Go 1.27.3 编译，附带 SHA-256 校验文件。
+- 修改涉及的协议根包、Xray 互操作包及 gRPC 包 vet 检查通过；协议库全包 vet 仍报告原有 `vless/vision.go` 两处 unsafe.Pointer 警告。
