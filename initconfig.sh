@@ -122,7 +122,7 @@ add_node_config() {
     echo "1. sing-box（SS、VMess、Trojan、AnyTLS、TUIC 等）"
     echo "2. 独立 Hysteria2"
     echo "3. VLESS + XHTTP / HTTP/3（Xray，读取面板设置）"
-    echo "4. Xray 其他节点（VLESS、VMess、Trojan、SS）"
+    echo "4. Xray 内核（VLESS、VMess、Trojan、SS）"
     while true; do
         read -rp "请选择 [1-4]：" core_choice || return 1
         case "$core_choice" in
@@ -148,8 +148,18 @@ add_node_config() {
         NodeType=hysteria2
     else
         echo -e "${yellow}请选择面板中的协议：${plain}"
-        echo "1. Shadowsocks  2. VLESS  3. VMess  6. Trojan"
-        if [[ "$core" == sing ]]; then echo "4. Hysteria  5. Hysteria2  7. TUIC  8. AnyTLS"; fi
+        echo "1. Shadowsocks"
+        echo "2. VLESS"
+        echo "3. VMess"
+        if [[ "$core" == sing ]]; then
+            echo "4. Hysteria"
+            echo "5. Hysteria2"
+        fi
+        echo "6. Trojan"
+        if [[ "$core" == sing ]]; then
+            echo "7. TUIC"
+            echo "8. AnyTLS"
+        fi
         while true; do
             read -rp "请输入协议编号：" NodeType || return 1
             case "$NodeType" in
@@ -644,10 +654,13 @@ rollback_external_web() {
 # 生成伪装网站首页；已存在则保留，可自行替换 /etc/V2bX/www 下的文件
 generate_fallback_site() {
     local site_dir=/etc/V2bX/www
+    # 网页由非 root 的 nginx worker 读取，不能继承配置文件的 umask 077。
+    mkdir -p "$site_dir"
+    chmod 755 "$site_dir"
     if [ -f "$site_dir/index.html" ]; then
+        chmod 644 "$site_dir/index.html"
         return
     fi
-    mkdir -p "$site_dir"
     local names=("Field Notes" "Small Workshop" "Quiet Corner" "Weekend Log" "Paper Trail" "Slow Notes" "Night Shift" "Open Drawer")
     local topics=("home server maintenance" "film photography" "bread baking" "trail running" "keyboard building" "city cycling" "houseplants" "old radios")
     local site_name=${names[$((RANDOM % ${#names[@]}))]}
@@ -688,6 +701,7 @@ footer{margin-top:3rem;color:#999;font-size:.85rem}
 </body>
 </html>
 SITE
+    chmod 644 "$site_dir/index.html"
 }
 
 generate_config_file() {
@@ -717,8 +731,7 @@ generate_config_file() {
     while true; do
         if [ "$first_node" = true ]; then
             read -rp "请输入机场网址(https://example.com)：" ApiHost
-            read -srp "请输入面板对接 API Key（输入不显示）：" ApiKey
-            echo
+            read -rp "请输入面板对接 API Key：" ApiKey
             read -rp "是否设置固定的机场网址和API Key？(y/n)" fixed_api
             if [ "$fixed_api" = "y" ] || [ "$fixed_api" = "Y" ]; then
                 fixed_api_info=true
@@ -732,8 +745,7 @@ generate_config_file() {
                 break
             elif [ "$fixed_api_info" = false ]; then
                 read -rp "请输入机场网址(https://example.com)：" ApiHost
-                read -srp "请输入面板对接 API Key（输入不显示）：" ApiKey
-                echo
+                read -rp "请输入面板对接 API Key：" ApiKey
             fi
             add_node_config || return 1
         fi
