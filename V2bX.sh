@@ -66,7 +66,7 @@ check_ipv6_support() {
 }
 
 confirm() {
-    if [[ $# > 1 ]]; then
+    if [[ $# -gt 1 ]]; then
         echo && read -rp "$1 [默认$2]: " temp
         if [[ x"${temp}" == x"" ]]; then
             temp=$2
@@ -107,20 +107,30 @@ install() {
 }
 
 update() {
+    local version installer status
     if [[ $# == 0 ]]; then
         echo && echo -n -e "输入指定版本(默认最新版): " && read version
     else
         version=$2
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/xshhhlol/V2bX-script/master/install.sh) $version
-    if [[ $? == 0 ]]; then
-        echo -e "${green}更新完成，已自动重启 V2bX，请使用 V2bX log 查看运行日志${plain}"
+    installer=$(mktemp) || return 1
+    if ! curl -fLsS --connect-timeout 10 --max-time 30 https://raw.githubusercontent.com/xshhhlol/V2bX-script/master/install.sh -o "$installer" || ! bash -n "$installer"; then
+        rm -f -- "$installer"
+        echo "安装脚本下载失败，当前程序未改动，请检查网络后重试。"
+        return 1
+    fi
+    if [[ -n "$version" ]]; then bash "$installer" "$version"; else bash "$installer"; fi
+    status=$?
+    rm -f -- "$installer"
+    if [[ "$status" == 0 ]]; then
+        echo -e "${green}更新操作完成，请使用 V2bX status / V2bX log 查看状态和日志${plain}"
         exit
     fi
 
     if [[ $# == 0 ]]; then
         before_show_menu
     fi
+    return "$status"
 }
 
 config() {
@@ -717,7 +727,7 @@ show_menu() {
 }
 
 
-if [[ $# > 0 ]]; then
+if [[ $# -gt 0 ]]; then
     case $1 in
         "start") check_install 0 && start 0 ;;
         "stop") check_install 0 && stop 0 ;;

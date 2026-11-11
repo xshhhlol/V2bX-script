@@ -10,73 +10,173 @@ check_ipv6_support() {
     fi
 }
 
-add_node_config() {
-    echo -e "${green}请选择节点核心类型：${plain}"
-    echo -e "${green}1. singbox${plain}"
-    echo -e "${green}2. hysteria2${plain}"
-    # 当前发布版本未包含 xray 内核；core_type 沿用原编号（2=sing，3=hysteria2）
+ensure_json_tool() {
+    command -v jq >/dev/null 2>&1 && return 0
+    echo "正在安装读取面板配置所需的 jq……"
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y jq
+    elif command -v apk >/dev/null 2>&1; then
+        apk add jq
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y jq
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -S --noconfirm --needed jq
+    fi
+    command -v jq >/dev/null 2>&1 || { echo "jq 安装失败，请检查软件源后重试。"; return 1; }
+}
+
+prepare_xhttp_node() {
+    local binary=/usr/local/V2bX/V2bX version response metadata
+    version=$("$binary" version 2>/dev/null) || { echo "请先安装 V2bX，再运行 V2bX generate。"; return 1; }
+    if [[ ! "$version" =~ V2bX\ v([0-9]+)\.([0-9]+)\.([0-9]+) ]] ||
+       (( BASH_REMATCH[1] == 0 || (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] < 4) ||
+          (BASH_REMATCH[1] == 1 && BASH_REMATCH[2] == 4 && BASH_REMATCH[3] < 7) )); then
+        echo "XHTTP/H3 需要包含 Xray 的官方 V2bX v1.4.7 或更新版本，请先运行 V2bX update。"
+        return 1
+    fi
+    ensure_json_tool || return 1
+    if [[ ! "$ApiHost" =~ ^https?://[^/?\#]+/?$ ]]; then
+        echo "请填写面板根地址，例如 https://panel.example.com，不要带后台路径。"
+        return 1
+    fi
+    echo "正在读取面板节点 ${NodeID}……"
+    # Read the token from a descriptor so it never appears in curl's arguments.
+    if ! response=$(curl -fsS --connect-timeout 10 --max-time 30 --get \
+        --data-urlencode node_type=vless --data-urlencode "node_id=$NodeID" \
+        --data-urlencode 'token@/dev/fd/3' "${ApiHost%/}/api/v1/server/UniProxy/config" \
+        3< <(printf '%s' "$ApiKey") 2>/dev/null); then
+        echo "面板连接失败，请核对根地址、对接 API Key、节点 ID 和面板访问限制。已有配置未改动。"
+        return 1
+    fi
+    if ! metadata=$(printf '%s' "$response" | jq -ce '
+        def settings: if type=="string" then fromjson else . end;
+        . as $n | ($n.network_settings // $n.networkSettings | settings) as $s |
+        ($s.alpn // []) as $raw |
+        ($raw | if type=="string" then split(",")|map(gsub("^\\s+|\\s+$";"")) else . end) as $a |
+        select(($n.network=="xhttp" or $n.network=="splithttp") and (($n.tls|tonumber)==1) and
+          (($n.flow // "")=="") and ($s|type)=="object" and ($a|type)=="array") |
+        select(all($a[]; .=="h3" or .=="h2" or .=="http/1.1")) |
+        select(($a|index("h3"))==null or $a==["h3"]) |
+        select((["auto","packet-up","stream-up","stream-one"]|index($s.mode // "auto"))!=null) |
+        ($n.server_port|tonumber) as $port | select($port>=1 and $port<=65535 and ($port|floor)==$port) |
+        {alpn:$a,port:$port,domain:(($n.tls_settings // $n.tlsSettings // {}) | .server_name // .serverName // "")}
+        ' 2>/dev/null); then
+        echo "面板节点尚未配置完整：请选择 VLESS + XHTTP + TLS，清空 flow，保存路径和 mode。"
+        echo '使用 HTTP/3 时，ALPN 只填写 h3；使用 H2 时不要混入 h3。保存后重新运行向导。'
+        return 1
+    fi
+    xhttp_alpn=$(printf '%s' "$metadata" | jq -c .alpn)
+    xhttp_port=$(printf '%s' "$metadata" | jq -r .port)
+    xhttp_domain=$(printf '%s' "$metadata" | jq -r .domain)
+    if [[ "$xhttp_alpn" == '["h3"]' ]]; then
+        echo "已读取：VLESS + XHTTP / HTTP/3，服务端口 ${xhttp_port}。请在云安全组和系统防火墙放行 UDP ${xhttp_port}。"
+    else
+        echo "已读取：VLESS + XHTTP（TCP），服务端口 ${xhttp_port}。请放行 TCP ${xhttp_port}。"
+    fi
+    echo "path、mode、extra 等参数由 V2bX 持续从面板拉取，不用在这里重复填写。"
+    echo "上下行分离参数请在面板高级设置中配置，并确认客户端订阅支持；两个入口最终需抵达同一入站。"
+    echo "ALPN 已按面板复制到本机；以后切换 H2/H3 时，请重新运行配置向导。"
+}
+
+configure_xhttp_certificate() {
+    local choice
+    echo "XHTTP 的 TLS 证书需要在本机准备。推荐自动申请，无需手动编辑 JSON。"
     while true; do
-        read -rp "请输入：" core_choice
-        if [ "$core_choice" == "1" ]; then
-            core_type="2"
-            core="sing"
-            core_sing=true
-            break
-        elif [ "$core_choice" == "2" ]; then
-            core_type="3"
-            core="hysteria2"
-            core_hysteria2=true
-            break
-        else
-            echo "无效的选择。请选择 1 2。"
-        fi
+        read -rp '证书方式：1. HTTP 自动申请（默认）  2. 使用已有 PEM 证书 [1/2]：' choice || return 1
+        case "$choice" in
+            ""|1) certmode=http; break ;;
+            2) certmode=file; break ;;
+            *) echo "请输入 1 或 2。" ;;
+        esac
     done
     while true; do
-        read -rp "请输入节点Node ID：" NodeID
-        # 判断NodeID是否为正整数
-        if [[ "$NodeID" =~ ^[0-9]+$ ]]; then
-            break  # 输入正确，退出循环
-        else
-            echo "错误：请输入正确的数字作为Node ID。"
+        read -rp "证书域名（须与面板 TLS server_name 一致，默认 ${xhttp_domain}）：" certdomain || return 1
+        certdomain=${certdomain:-$xhttp_domain}
+        if [[ "$certdomain" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z0-9.-]+$ && ! "$certdomain" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then break; fi
+        echo "请填写已解析到本机的域名，不要填写 IP、端口或 https://。"
+    done
+    if [[ -n "$xhttp_domain" && "$(printf '%s' "$certdomain" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$xhttp_domain" | tr '[:upper:]' '[:lower:]')" ]]; then
+        echo "证书域名与面板 TLS server_name 不一致，请先在面板修正后重新运行向导。"
+        return 1
+    fi
+    if [[ "$certmode" == http ]]; then
+        cert_file="/etc/V2bX/certs/$certdomain/fullchain.cer"
+        cert_key="/etc/V2bX/certs/$certdomain/cert.key"
+        echo "请确保域名已解析到本机，并放行 TCP 80；该端口用于自动申请和续签证书。"
+        echo "服务启动时将申请证书并自动续签。Cloudflare 等代理请先设为仅 DNS。"
+    else
+        read -rp '完整证书链文件路径：' cert_file || return 1
+        read -rp '证书私钥文件路径：' cert_key || return 1
+        if [[ "$cert_file" != /* || "$cert_key" != /* || ! -s "$cert_file" || ! -r "$cert_file" || ! -s "$cert_key" || ! -r "$cert_key" ]]; then
+            echo "证书或私钥文件不存在、为空或不可读，请使用绝对路径。已有配置未改动。"
+            return 1
         fi
+        echo "使用已有证书；请由原证书工具负责续签，并在续签后重启 V2bX。"
+    fi
+}
+
+add_node_config() {
+    local panel_xhttp=false xhttp_alpn='[]' xhttp_port='' xhttp_domain=''
+    local cert_file=/etc/V2bX/fullchain.cer cert_key=/etc/V2bX/cert.key
+    echo -e "${green}请选择节点类型（与面板一致）：${plain}"
+    echo "1. sing-box（SS、VMess、Trojan、AnyTLS、TUIC 等）"
+    echo "2. 独立 Hysteria2"
+    echo "3. VLESS + XHTTP / HTTP/3（Xray，读取面板设置）"
+    echo "4. Xray 其他节点（VLESS、VMess、Trojan、SS）"
+    while true; do
+        read -rp "请选择 [1-4]：" core_choice || return 1
+        case "$core_choice" in
+            1) core_type=2; core=sing; core_sing=true; break ;;
+            2) core_type=3; core=hysteria2; core_hysteria2=true; break ;;
+            3|4)
+                core_type=1; core=xray; core_xray=true
+                if [[ "$core_choice" == 3 ]]; then panel_xhttp=true; fi
+                break ;;
+            *) echo "请输入 1、2、3 或 4。" ;;
+        esac
+    done
+    while true; do
+        read -rp "请输入面板中的节点 ID：" NodeID || return 1
+        if [[ "$NodeID" =~ ^[1-9][0-9]*$ ]]; then break; fi
+        echo "节点 ID 应为大于 0 的整数，请在面板节点列表查看。"
     done
 
-    if [ "$core_hysteria2" = true ] && [ "$core_xray" = false ] && [ "$core_sing" = false ]; then
-        NodeType="hysteria2"
+    if [[ "$panel_xhttp" == true ]]; then
+        NodeType=vless
+        prepare_xhttp_node || return 1
+    elif [[ "$core" == hysteria2 ]]; then
+        NodeType=hysteria2
     else
-        echo -e "${yellow}请选择节点传输协议：${plain}"
-        echo -e "${green}1. Shadowsocks${plain}"
-        echo -e "${green}2. Vless${plain}"
-        echo -e "${green}3. Vmess${plain}"
-        if [ "$core_sing" == true ]; then
-            echo -e "${green}4. Hysteria${plain}"
-            echo -e "${green}5. Hysteria2${plain}"
-        fi
-        if [ "$core_hysteria2" == true ] && [ "$core_sing" = false ]; then
-            echo -e "${green}5. Hysteria2${plain}"
-        fi
-        echo -e "${green}6. Trojan${plain}"  
-        if [ "$core_sing" == true ]; then
-            echo -e "${green}7. Tuic${plain}"
-            echo -e "${green}8. AnyTLS${plain}"
-        fi
-        read -rp "请输入：" NodeType
-        case "$NodeType" in
-            1 ) NodeType="shadowsocks" ;;
-            2 ) NodeType="vless" ;;
-            3 ) NodeType="vmess" ;;
-            4 ) NodeType="hysteria" ;;
-            5 ) NodeType="hysteria2" ;;
-            6 ) NodeType="trojan" ;;
-            7 ) NodeType="tuic" ;;
-            8 ) NodeType="anytls" ;;
-            * ) NodeType="shadowsocks" ;;
-        esac
+        echo -e "${yellow}请选择面板中的协议：${plain}"
+        echo "1. Shadowsocks  2. VLESS  3. VMess  6. Trojan"
+        if [[ "$core" == sing ]]; then echo "4. Hysteria  5. Hysteria2  7. TUIC  8. AnyTLS"; fi
+        while true; do
+            read -rp "请输入协议编号：" NodeType || return 1
+            case "$NodeType" in
+                1) NodeType=shadowsocks; break ;;
+                2) NodeType=vless; break ;;
+                3) NodeType=vmess; break ;;
+                6) NodeType=trojan; break ;;
+                4|5|7|8)
+                    if [[ "$core" != sing ]]; then echo "该协议请选择 sing-box 内核。"; continue; fi
+                    case "$NodeType" in
+                        4) NodeType=hysteria ;; 5) NodeType=hysteria2 ;;
+                        7) NodeType=tuic ;; 8) NodeType=anytls ;;
+                    esac
+                    break ;;
+                *) echo "请选择列表中的协议编号。" ;;
+            esac
+        done
     fi
+    local node_is_sing=false
+    if [[ "$core" == sing ]]; then node_is_sing=true; fi
     fastopen=true
     isreality=""
     istls=""
-    if [ "$NodeType" == "vless" ]; then
+    if [[ "$panel_xhttp" == true ]]; then
+        istls=y
+        fastopen=false
+    elif [ "$NodeType" == "vless" ]; then
         read -rp "请选择是否为reality节点？(y/n)" isreality
     elif [ "$NodeType" == "hysteria" ] || [ "$NodeType" == "hysteria2" ] || [ "$NodeType" == "tuic" ] || [ "$NodeType" == "anytls" ]; then
         fastopen=false
@@ -91,7 +191,9 @@ add_node_config() {
 
     certmode="none"
     certdomain="example.com"
-    if [[ "$isreality" != "y" && "$isreality" != "Y" && ( "$istls" == "y" || "$istls" == "Y" ) ]]; then
+    if [[ "$panel_xhttp" == true ]]; then
+        configure_xhttp_certificate || return 1
+    elif [[ "$isreality" != "y" && "$isreality" != "Y" && ( "$istls" == "y" || "$istls" == "Y" ) ]]; then
         echo -e "${yellow}请选择证书申请模式：${plain}"
         echo -e "${green}1. http模式自动申请，节点域名已正确解析${plain}"
         echo -e "${green}2. dns模式自动申请，需填入正确域名服务商API参数${plain}"
@@ -111,7 +213,7 @@ add_node_config() {
     reject_sni=false
     harden_config=""
     external_web=false
-    if [[ "$core_sing" == true && ( ( "$certmode" != "none" && ( "$NodeType" == "trojan" || "$NodeType" == "anytls" ) ) || "$NodeType" == "vmess" ) ]]; then
+    if [[ "$node_is_sing" == true && ( ( "$certmode" != "none" && ( "$NodeType" == "trojan" || "$NodeType" == "anytls" ) ) || "$NodeType" == "vmess" ) ]]; then
         read -rp "是否启用网站伪装？默认使用内置网站（回车默认 y）(y/n)：" harden_choice
         if [[ ! "$harden_choice" =~ ^[Nn] ]]; then
             if [[ "$core_type" == "2" && "$certmode" != "none" ]]; then
@@ -182,7 +284,7 @@ add_node_config() {
             fi
         fi
     fi
-    if [[ "$core_sing" == true && "$NodeType" == "shadowsocks" ]]; then
+    if [[ "$node_is_sing" == true && "$NodeType" == "shadowsocks" ]]; then
         local ss_options="" ss_mux="" ss_tcp_choice="" ss_udp_choice=""
         echo -e "\n${green}Shadowsocks 配置指引${plain}"
         echo "面板里的加密方式、服务端口和服务端密钥由 V2bX 自动读取，无需在这里重复填写。"
@@ -247,38 +349,18 @@ add_node_config() {
         listen_ip="::"
     fi
     node_config=""
-    if [ "$core_type" == "1" ]; then 
-    node_config=$(cat <<EOF
-{
-            "Core": "$core",
-            "ApiHost": "$ApiHost",
-            "ApiKey": "$ApiKey",
-            "NodeID": $NodeID,
-            "NodeType": "$NodeType",
-            "Timeout": 30,
-            "ListenIP": "0.0.0.0",
-            "SendIP": "0.0.0.0",
-            "DeviceOnlineMinTraffic": 200,
-            "MinReportTraffic": 0,
-            "EnableProxyProtocol": false,
-            "EnableUot": true,
-            "EnableTFO": true,
-            "DNSType": "UseIPv4",
-            "CertConfig": {
-                "CertMode": "$certmode",
-                "RejectUnknownSni": false,
-                "CertDomain": "$certdomain",
-                "CertFile": "/etc/V2bX/fullchain.cer",
-                "KeyFile": "/etc/V2bX/cert.key",
-                "Email": "v2bx@github.com",
-                "Provider": "cloudflare",
-                "DNSEnv": {
-                    "EnvName": "env1"
-                }
-            }
-        },
-EOF
-)
+    if [ "$core_type" == "1" ]; then
+        ensure_json_tool || return 1
+        node_config=$(jq -n --arg host "$ApiHost" --rawfile key /dev/fd/3 --argjson id "$NodeID" \
+            --arg type "$NodeType" --arg mode "$certmode" --arg domain "$certdomain" \
+            --arg cert "$cert_file" --arg certkey "$cert_key" --argjson alpn "$xhttp_alpn" '
+            {Core:"xray",ApiHost:$host,ApiKey:$key,NodeID:$id,NodeType:$type,Timeout:30,
+             ListenIP:"0.0.0.0",SendIP:"0.0.0.0",DeviceOnlineMinTraffic:200,ReportMinTraffic:0,
+             XrayOptions:({EnableProxyProtocol:false,EnableTFO:false} +
+               (if ($alpn|length)>0 then {ALPN:$alpn} else {} end)),
+             CertConfig:{CertMode:$mode,RejectUnknownSni:false,CertDomain:$domain,
+               CertFile:$cert,KeyFile:$certkey,Email:"v2bx@github.com"}}' 3< <(printf '%s' "$ApiKey")) || return 1
+        node_config+=","
     elif [ "$core_type" == "2" ]; then
     node_config=$(cat <<EOF
 {
@@ -339,7 +421,34 @@ EOF
 EOF
 )
     fi
+    if [[ "$panel_xhttp" == true ]]; then
+        if [[ "$xhttp_alpn" == '["h3"]' ]]; then xhttp_checks+=("u:$xhttp_port"); else xhttp_checks+=("t:$xhttp_port"); fi
+    fi
     nodes_config+=("$node_config")
+}
+
+wait_xhttp_ready() {
+    if ! command -v ss >/dev/null 2>&1; then
+        echo "缺少端口检查工具 ss，无法确认节点就绪；请安装 iproute2 后重试。"
+        return 1
+    fi
+    local attempt check protocol port ready
+    echo "正在等待 XHTTP 监听端口就绪，首次申请证书可能需要一些时间（最多 90 秒）……"
+    for ((attempt=0;attempt<90;attempt++)); do
+        external_web_service_running || { echo "V2bX 服务已经退出，请查看日志。"; return 1; }
+        ready=true
+        for check in "${xhttp_checks[@]}"; do
+            protocol=${check%%:*}; port=${check#*:}
+            if ! ss -H "-l${protocol}np" 2>/dev/null | awk -v port="$port" '$4 ~ (":" port "$") && /"V2bX"/ {found=1} END {exit !found}'; then ready=false; fi
+        done
+        if [[ "$ready" == true ]]; then
+            echo "XHTTP 监听端口已就绪。请更新客户端订阅后测试连接；外部网络是否放行仍需客户端验证。"
+            return 0
+        fi
+        sleep 1
+    done
+    echo "等待超时，请检查证书申请、面板连接或端口占用，运行 V2bX log 查看日志。"
+    return 1
 }
 
 # Inventory package names, not executable paths: Ubuntu's nginx metapackage
@@ -593,6 +702,7 @@ generate_config_file() {
     fi
     
     nodes_config=()
+    xhttp_checks=()
     first_node=true
     core_xray=false
     core_sing=false
@@ -607,23 +717,25 @@ generate_config_file() {
     while true; do
         if [ "$first_node" = true ]; then
             read -rp "请输入机场网址(https://example.com)：" ApiHost
-            read -rp "请输入面板对接API Key：" ApiKey
+            read -srp "请输入面板对接 API Key（输入不显示）：" ApiKey
+            echo
             read -rp "是否设置固定的机场网址和API Key？(y/n)" fixed_api
             if [ "$fixed_api" = "y" ] || [ "$fixed_api" = "Y" ]; then
                 fixed_api_info=true
                 echo -e "${red}成功固定地址${plain}"
             fi
             first_node=false
-            add_node_config
+            add_node_config || return 1
         else
             read -rp "是否继续添加节点配置？(回车继续，输入n或no退出)" continue_adding_node
             if [[ "$continue_adding_node" =~ ^[Nn][Oo]? ]]; then
                 break
             elif [ "$fixed_api_info" = false ]; then
                 read -rp "请输入机场网址(https://example.com)：" ApiHost
-                read -rp "请输入面板对接API Key：" ApiKey
+                read -srp "请输入面板对接 API Key（输入不显示）：" ApiKey
+                echo
             fi
-            add_node_config
+            add_node_config || return 1
         fi
     done
 
@@ -690,7 +802,7 @@ generate_config_file() {
 
     local web_backup="" web_was_running=false web_started_at=0
     local web_files=(config.json config.json.bak custom_outbound.json route.json sing_origin.json hy2config.yaml fullchain.cer cert.key)
-    if [[ "$need_external_web" == true ]]; then
+    if [[ "$need_external_web" == true || ${#xhttp_checks[@]} -gt 0 ]]; then
         if external_web_service_running; then web_was_running=true; fi
         web_backup=$(mktemp -d /etc/V2bX/.web-rollback.XXXXXX) || return 1
         local web_file
@@ -703,7 +815,10 @@ generate_config_file() {
     fi
     
     # 备份旧的配置文件
-    mv config.json config.json.bak
+    if [[ -f config.json ]]; then cp -p config.json config.json.bak; fi
+    local old_umask
+    old_umask=$(umask)
+    umask 077
     nodes_config_str="${nodes_config[*]}"
     formatted_nodes_config="${nodes_config_str%,}"
     if [ "$need_fallback_site" = true ]; then
@@ -722,6 +837,10 @@ generate_config_file() {
 }
 EOF
     
+    chmod 600 /etc/V2bX/config.json
+    if [[ -f /etc/V2bX/config.json.bak ]]; then chmod 600 /etc/V2bX/config.json.bak; fi
+    umask "$old_umask"
+
     # 创建 custom_outbound.json 文件
     cat <<EOF > /etc/V2bX/custom_outbound.json
 [
@@ -917,7 +1036,7 @@ EOF
     echo -e "${green}V2bX 配置文件生成完成,正在重新启动服务${plain}"
     web_started_at=$(date +%s)
     local web_launch_failed=false
-    if [[ "$need_external_web" == true ]]; then
+    if [[ "$need_external_web" == true || ${#xhttp_checks[@]} -gt 0 ]]; then
         # A systemd start job completing does not mean node initialization has
         # finished. Print success only after the frontend readiness checks.
         if command -v systemctl >/dev/null 2>&1; then
@@ -945,7 +1064,14 @@ EOF
             rollback_external_web || echo "自动恢复未完成，请保留备份目录：$web_backup"
             return 1
         fi
-        rm -rf -- "$web_backup"
         echo "外部前端已就绪；以后仍使用 V2bX start/stop/restart 管理。"
     fi
+    if [[ ${#xhttp_checks[@]} -gt 0 ]]; then
+        if [[ "$web_launch_failed" == true ]] || ! wait_xhttp_ready; then
+            echo "XHTTP 启动未完成，正在恢复原配置。"
+            rollback_external_web || echo "自动恢复未完成，请保留备份目录：$web_backup"
+            return 1
+        fi
+    fi
+    if [[ -n "$web_backup" ]]; then rm -rf -- "$web_backup"; fi
 }

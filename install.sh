@@ -80,23 +80,23 @@ fi
 
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
-        yum install epel-release wget curl unzip tar crontabs socat ca-certificates -y >/dev/null 2>&1
+        yum install epel-release wget curl unzip tar crontabs socat ca-certificates jq iproute -y >/dev/null 2>&1
         update-ca-trust force-enable >/dev/null 2>&1
     elif [[ x"${release}" == x"alpine" ]]; then
-        apk add wget curl unzip tar socat ca-certificates >/dev/null 2>&1
+        apk add wget curl unzip tar socat ca-certificates jq iproute2 >/dev/null 2>&1
         update-ca-certificates >/dev/null 2>&1
     elif [[ x"${release}" == x"debian" ]]; then
         apt-get update -y >/dev/null 2>&1
-        apt install wget curl unzip tar cron socat ca-certificates -y >/dev/null 2>&1
+        apt install wget curl unzip tar cron socat ca-certificates jq iproute2 -y >/dev/null 2>&1
         update-ca-certificates >/dev/null 2>&1
     elif [[ x"${release}" == x"ubuntu" ]]; then
         apt-get update -y >/dev/null 2>&1
-        apt install wget curl unzip tar cron socat -y >/dev/null 2>&1
+        apt install wget curl unzip tar cron socat jq iproute2 -y >/dev/null 2>&1
         apt-get install ca-certificates wget -y >/dev/null 2>&1
         update-ca-certificates >/dev/null 2>&1
     elif [[ x"${release}" == x"arch" ]]; then
         pacman -Sy --noconfirm >/dev/null 2>&1
-        pacman -S --noconfirm --needed wget curl unzip tar cron socat >/dev/null 2>&1
+        pacman -S --noconfirm --needed wget curl unzip tar cron socat jq iproute2 >/dev/null 2>&1
         pacman -S --noconfirm --needed ca-certificates wget >/dev/null 2>&1
     fi
 }
@@ -114,8 +114,7 @@ check_status() {
             return 1
         fi
     else
-        temp=$(systemctl status V2bX | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
-        if [[ x"${temp}" == x"running" ]]; then
+        if systemctl is-active --quiet V2bX; then
             return 0
         else
             return 1
@@ -124,44 +123,78 @@ check_status() {
 }
 
 install_V2bX() {
-    if [[ -e /usr/local/V2bX/ ]]; then
-        rm -rf /usr/local/V2bX/
-    fi
-
-    mkdir /usr/local/V2bX/ -p
-    cd /usr/local/V2bX/
-
-    if  [ $# == 0 ] ;then
-        last_version=$(curl -Ls "https://api.github.com/repos/xshhhlol/V2bX/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}检测 V2bX 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 V2bX 版本安装${plain}"
-            exit 1
-        fi
-        echo -e "检测到 V2bX 最新版本：${last_version}，开始安装"
-        wget --no-check-certificate -N --progress=bar -O /usr/local/V2bX/V2bX-linux.zip https://github.com/xshhhlol/V2bX/releases/download/${last_version}/V2bX-linux-${arch}.zip
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 V2bX 失败，请确保你的服务器能够下载 Github 的文件${plain}"
-            exit 1
+    local stage candidate_version expected_hash actual_hash entry auto_version=false
+    if [[ $# == 0 || -z "$1" ]]; then
+        auto_version=true
+        last_version=$(curl -fsS --connect-timeout 10 --max-time 30 "https://api.github.com/repos/xshhhlol/V2bX/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        if [[ -z "$last_version" ]]; then
+            echo "无法查询最新稳定版本，请检查网络，或运行 V2bX update v1.4.8 指定版本。"
+            return 1
         fi
     else
         last_version=$1
-        url="https://github.com/xshhhlol/V2bX/releases/download/${last_version}/V2bX-linux-${arch}.zip"
-        echo -e "开始安装 V2bX $1"
-        wget --no-check-certificate -N --progress=bar -O /usr/local/V2bX/V2bX-linux.zip ${url}
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 V2bX $1 失败，请确保此版本存在${plain}"
-            exit 1
+        if [[ "$last_version" != v* ]]; then last_version="v$last_version"; fi
+    fi
+    if [[ ! "$last_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+        echo "版本号无效，请填写类似 v1.4.8 的版本号。"
+        return 1
+    fi
+    if [[ "$auto_version" == true && -x /usr/local/V2bX/V2bX ]]; then
+        local current_version current_major current_minor current_patch target_major target_minor target_patch
+        current_version=$(/usr/local/V2bX/V2bX version 2>/dev/null)
+        if [[ "$current_version" =~ V2bX\ v([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+            current_major=${BASH_REMATCH[1]}; current_minor=${BASH_REMATCH[2]}; current_patch=${BASH_REMATCH[3]}
+            IFS=. read -r target_major target_minor target_patch <<< "${last_version#v}"
+            target_patch=${target_patch%%-*}
+            if (( current_major > target_major || (current_major == target_major && current_minor > target_minor) ||
+                  (current_major == target_major && current_minor == target_minor && current_patch > target_patch) )); then
+                echo "当前程序比最新完整发布版 ${last_version} 更新，保持现状，不自动降级。"
+                echo "如需手动降级，请明确指定版本，例如 V2bX update ${last_version}。"
+                return 0
+            fi
         fi
     fi
-
-    unzip V2bX-linux.zip
-    rm V2bX-linux.zip -f
-    chmod +x V2bX
-    mkdir /etc/V2bX/ -p
-    cp geoip.dat /etc/V2bX/
-    cp geosite.dat /etc/V2bX/
+    echo "准备安装 V2bX ${last_version}；先下载和校验，成功后才替换当前程序。"
+    stage=$(mktemp -d /tmp/v2bx-install.XXXXXX) || return 1
+    local url="https://github.com/xshhhlol/V2bX/releases/download/$last_version/V2bX-linux-${arch}.zip"
+    if ! curl -fLsS --retry 2 --connect-timeout 15 --max-time 180 "$url" -o "$stage/package.zip" ||
+       ! curl -fLsS --retry 2 --connect-timeout 15 --max-time 60 "$url.dgst" -o "$stage/package.dgst"; then
+        echo "该版本的安装包或校验文件尚未发布，或下载失败。旧程序和配置未改动，请稍后重试。"
+        rm -rf -- "$stage"
+        return 1
+    fi
+    expected_hash=$(awk 'tolower($0) ~ /sha.*256/ {print $NF; exit}' "$stage/package.dgst")
+    actual_hash=$(sha256sum "$stage/package.zip" | awk '{print $1}')
+    if [[ ! "$expected_hash" =~ ^[a-fA-F0-9]{64}$ || "$actual_hash" != "$expected_hash" ]] ||
+       ! unzip -q "$stage/package.zip" -d "$stage/files" || [[ ! -s "$stage/files/V2bX" ]]; then
+        echo "安装包校验或解压失败，旧程序和配置未改动。"
+        rm -rf -- "$stage"
+        return 1
+    fi
+    chmod +x "$stage/files/V2bX"
+    candidate_version=$("$stage/files/V2bX" version 2>/dev/null)
+    if [[ "$candidate_version" != *"V2bX $last_version "* ]]; then
+        echo "安装包版本不符或无法运行，请检查系统架构与版本。旧程序未改动。"
+        rm -rf -- "$stage"
+        return 1
+    fi
+    mkdir -p /usr/local/V2bX /etc/V2bX || { rm -rf -- "$stage"; return 1; }
+    if [[ -f /usr/local/V2bX/V2bX ]]; then
+        cp -p /usr/local/V2bX/V2bX /usr/local/V2bX/V2bX.previous || { rm -rf -- "$stage"; return 1; }
+    fi
+    for entry in "$stage/files/"*; do
+        [[ "${entry##*/}" == V2bX ]] && continue
+        cp -R -- "$entry" /usr/local/V2bX/ || { rm -rf -- "$stage"; return 1; }
+    done
+    install -m 755 "$stage/files/V2bX" /usr/local/V2bX/V2bX.new &&
+        mv -f /usr/local/V2bX/V2bX.new /usr/local/V2bX/V2bX || { rm -rf -- "$stage"; return 1; }
+    rm -rf -- "$stage"
+    cd /usr/local/V2bX/ || return 1
+    for entry in geoip.dat geosite.dat; do
+        if [[ -f "$entry" ]]; then cp "$entry" /etc/V2bX/; fi
+    done
     if [[ x"${release}" == x"alpine" ]]; then
-        rm /etc/init.d/V2bX -f
+        if [[ ! -f /etc/init.d/V2bX ]]; then
         cat <<EOF > /etc/init.d/V2bX
 #!/sbin/openrc-run
 
@@ -179,11 +212,12 @@ depend() {
         need net
 }
 EOF
+        fi
         chmod +x /etc/init.d/V2bX
         rc-update add V2bX default
         echo -e "${green}V2bX ${last_version}${plain} 安装完成，已设置开机自启"
     else
-        rm /etc/systemd/system/V2bX.service -f
+        if [[ ! -f /etc/systemd/system/V2bX.service ]]; then
         cat <<EOF > /etc/systemd/system/V2bX.service
 [Unit]
 Description=V2bX Service
@@ -206,6 +240,7 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+        fi
         systemctl daemon-reload
         systemctl stop V2bX
         systemctl enable V2bX
@@ -221,7 +256,7 @@ EOF
         cp config.json /etc/V2bX/
         echo -e ""
         echo -e "下一步：在面板建好节点，准备面板地址、API Key 和节点 ID，再按向导生成配置。"
-        echo -e "Shadowsocks 向导会说明加密方式、端口和 TCP/UDP 优化的适用范围。"
+        echo "XHTTP/H3 请选择向导第 3 项；路径、mode 和高级参数在面板配置，向导会读取检查。"
         first_install=true
     else
         if [[ x"${release}" == x"alpine" ]]; then
@@ -235,7 +270,14 @@ EOF
         if [[ $? == 0 ]]; then
             echo -e "${green}V2bX 重启成功${plain}"
         else
-            echo -e "${red}V2bX 可能启动失败，请稍后使用 V2bX log 查看日志信息，若无法启动，则可能更改了配置格式，请前往 wiki 查看：https://github.com/V2bX-project/V2bX/wiki${plain}"
+            echo "新版未能启动。请运行 V2bX log 查看原因。"
+            if [[ -f /usr/local/V2bX/V2bX.previous ]]; then
+                cp -p /usr/local/V2bX/V2bX.previous /usr/local/V2bX/V2bX.rollback &&
+                    mv -f /usr/local/V2bX/V2bX.rollback /usr/local/V2bX/V2bX
+                if [[ "$release" == alpine ]]; then service V2bX restart; else systemctl restart V2bX; fi
+                echo "已恢复上一个程序版本；/etc/V2bX 中的节点配置和证书保留。"
+            fi
+            return 1
         fi
         first_install=false
     fi
@@ -252,8 +294,16 @@ EOF
     if [[ ! -f /etc/V2bX/custom_inbound.json ]]; then
         cp custom_inbound.json /etc/V2bX/
     fi
-    curl -o /usr/bin/V2bX -Ls https://raw.githubusercontent.com/xshhhlol/V2bX-script/master/V2bX.sh
-    chmod +x /usr/bin/V2bX
+    local manager_tmp
+    manager_tmp=$(mktemp /usr/bin/.v2bx-manager.XXXXXX) || return 1
+    if curl -fLsS --connect-timeout 10 --max-time 30 -o "$manager_tmp" https://raw.githubusercontent.com/xshhhlol/V2bX-script/master/V2bX.sh && bash -n "$manager_tmp"; then
+        chmod +x "$manager_tmp"
+        mv -f "$manager_tmp" /usr/bin/V2bX
+    else
+        rm -f -- "$manager_tmp"
+        echo "程序已安装，但管理脚本下载失败；已有管理脚本保留，请稍后重新运行安装器。"
+        return 1
+    fi
     if [ ! -L /usr/bin/v2bx ]; then
         ln -s /usr/bin/V2bX /usr/bin/v2bx
         chmod +x /usr/bin/v2bx
@@ -261,7 +311,6 @@ EOF
     # 自动做网络优化（BBR、闲置不重新慢启动等），不更换内核
     /usr/bin/V2bX optimize
     cd $cur_dir
-    rm -f install.sh
     echo -e ""
     echo "V2bX 管理脚本使用方法 (兼容使用V2bX执行，大小写不敏感): "
     echo "------------------------------------------"
@@ -287,10 +336,16 @@ EOF
     if [[ $first_install == true ]]; then
         read -rp "现在根据面板信息生成配置？回车暂不生成，也可稍后运行 V2bX generate [y/N]：" if_generate
         if [[ $if_generate == [Yy] ]]; then
-            curl -o ./initconfig.sh -Ls https://raw.githubusercontent.com/xshhhlol/V2bX-script/master/initconfig.sh
-            source initconfig.sh
-            rm initconfig.sh -f
-            generate_config_file
+            local wizard
+            wizard=$(mktemp) || return 1
+            if ! curl -fLsS --connect-timeout 10 --max-time 30 -o "$wizard" https://raw.githubusercontent.com/xshhhlol/V2bX-script/master/initconfig.sh || ! bash -n "$wizard"; then
+                rm -f -- "$wizard"
+                echo "配置向导下载失败，请稍后运行 V2bX generate。"
+                return 1
+            fi
+            source "$wizard"
+            rm -f -- "$wizard"
+            generate_config_file || return 1
         else
             echo "准备好面板信息后，运行 V2bX generate，按提示完成配置即可。"
         fi
@@ -299,4 +354,4 @@ EOF
 
 echo -e "${green}开始安装${plain}"
 install_base
-install_V2bX $1
+install_V2bX "$@"

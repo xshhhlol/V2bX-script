@@ -1,0 +1,24 @@
+name: Validate installer and configuration wizard
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install validation tools
+        run: sudo apt-get update -qq && sudo apt-get install -y jq shellcheck
+      - name: Check shell scripts
+        run: |
+          bash -n install.sh initconfig.sh V2bX.sh
+          shellcheck -S error install.sh initconfig.sh V2bX.sh
+      - name: Exercise configuration and update recovery
+        run: python3 -m unittest discover -s tests -v

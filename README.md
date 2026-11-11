@@ -17,6 +17,18 @@ Find the source code here: [xshhhlol/V2bX](https://github.com/xshhhlol/V2bX)
 wget -N https://raw.githubusercontent.com/xshhhlol/V2bX-script/master/install.sh && bash install.sh
 ```
 
+# XHTTP / HTTP/3 一键配置
+
+先在面板创建 **VLESS** 节点，传输选择 **XHTTP**，开启 **TLS**，清空 flow。HTTP/3 的 ALPN 只填 `h3`；证书域名填在 TLS `server_name`。路径、mode 和上下行分离等高级参数在面板配置。
+
+安装时进入配置向导，或安装后运行 `V2bX generate`，选择 **3. VLESS + XHTTP / HTTP/3**。填写面板根地址、对接 API Key 和节点 ID，向导会读取节点设置，并引导自动申请证书或使用已有证书文件，不需要手写 JSON。
+
+- H3 需要放行面板服务端口的 **UDP**；HTTP 自动申请证书还需要放行 **TCP 80**，并将证书域名解析到本机。
+- path、mode、extra 等配置由内核持续从面板拉取；**ALPN 在生成配置时复制到本机，切换 H2/H3 后需要重新运行向导**。
+- 下载包会先校验 SHA256，下载失败不会删除旧程序；更新保留现有配置、证书及服务自定义设置。指定版本运行 `V2bX update v1.4.8`，该架构安装包尚未发布时会保留旧版并提示重试。
+
+详细步骤、证书续签和面板填写示例见 [XHTTP 安装说明](docs/xhttp.md)。
+
 # 默认 BT 拦截
 
 配置向导生成的 `/etc/V2bX/sing_origin.json` 默认先嗅探流量，再拒绝识别为 `bittorrent` 的连接，规则位于最终直连之前。所有使用该 sing 内核的 SS / SS2022、VMess、Trojan、AnyTLS、TUIC 和 Hy2 节点共用这些规则，客户端无需修改。
