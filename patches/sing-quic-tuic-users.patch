@@ -1,0 +1,38 @@
+--- a/tuic/service.go
++++ b/tuic/service.go
+@@ -50,6 +50,7 @@
+ 	tlsConfig         aTLS.ServerConfig
+ 	heartbeat         time.Duration
+ 	quicConfig        *quic.Config
++	userAccess        sync.RWMutex
+ 	userMap           map[[16]byte]U
+ 	passwordMap       map[U]string
+ 	congestionControl string
+@@ -104,8 +105,10 @@
+ 		userMap[uuidList[index]] = userList[index]
+ 		passwordMap[userList[index]] = passwordList[index]
+ 	}
++	s.userAccess.Lock()
+ 	s.userMap = userMap
+ 	s.passwordMap = passwordMap
++	s.userAccess.Unlock()
+ }
+ 
+ func (s *Service[U]) Start(conn net.PacketConn) error {
+@@ -241,12 +244,15 @@
+ 		}
+ 		var userUUID [16]byte
+ 		copy(userUUID[:], buffer.Range(2, 2+16))
++		s.userAccess.RLock()
+ 		user, loaded := s.userMap[userUUID]
++		password := s.passwordMap[user]
++		s.userAccess.RUnlock()
+ 		if !loaded {
+ 			return E.New("authentication: unknown user ", uuid.UUID(userUUID))
+ 		}
+ 		handshakeState := s.quicConn.ConnectionState()
+-		tuicToken, err := handshakeState.TLS.ExportKeyingMaterial(string(userUUID[:]), []byte(s.passwordMap[user]), 32)
++		tuicToken, err := handshakeState.TLS.ExportKeyingMaterial(string(userUUID[:]), []byte(password), 32)
+ 		if err != nil {
+ 			return E.Cause(err, "authentication: export keying material")
+ 		}

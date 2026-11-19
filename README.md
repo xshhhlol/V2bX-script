@@ -1,4 +1,6 @@
 # V2bX
+
+AnyTLS、TUIC 和独立 Hy2 的面板审计适配、匹配语法、XrayR 对照与本地构建见[审计说明](docs/audit.md)。
 A V2board node server based on Xray-Core.
 
 一个基于Xray的V2board节点服务端，支持V2ay,Trojan,Shadowsocks协议

@@ -1,0 +1,132 @@
+--- a/server/config.go
++++ b/server/config.go
+@@ -25,11 +25,13 @@
+ )
+ 
+ type Config struct {
+-	TLSConfig             TLSConfig
+-	QUICConfig            QUICConfig
+-	Conn                  net.PacketConn
+-	StatelessResetKey     *quic.StatelessResetKey
+-	Cleanup               io.Closer
++	TLSConfig         TLSConfig
++	QUICConfig        QUICConfig
++	Conn              net.PacketConn
++	StatelessResetKey *quic.StatelessResetKey
++	Cleanup           io.Closer
++	// RequestScope binds hooks to an authenticated TCP request or UDP association.
++	RequestScope          func(id string, peer net.Addr, hook RequestHook, outbound Outbound) (RequestHook, Outbound)
+ 	RequestHook           RequestHook
+ 	Outbound              Outbound
+ 	CongestionConfig      CongestionConfig
+--- a/server/server.go
++++ b/server/server.go
+@@ -6,6 +6,7 @@
+ 	"crypto/tls"
+ 	"errors"
+ 	"math/rand"
++	"net"
+ 	"net/http"
+ 	"sync"
+ 	"time"
+@@ -219,7 +220,7 @@
+ 			if !h.config.DisableUDP {
+ 				go func() {
+ 					sm := newUDPSessionManager(
+-						&udpIOImpl{h.conn, id, h.config.TrafficLogger, h.config.RequestHook, h.config.Outbound},
++						&udpIOImpl{h.conn, id, h.config.TrafficLogger, h.config.RequestHook, h.config.Outbound, h.config.RequestScope},
+ 						&udpEventLoggerImpl{h.conn, id, h.config.EventLogger},
+ 						h.config.UDPIdleTimeout,
+ 					)
+@@ -282,18 +283,22 @@
+ 		return
+ 	}
+ 	streamStats.ReqAddr.Store(reqAddr)
++	hook, outbound := h.config.RequestHook, h.config.Outbound
++	if scope := h.config.RequestScope; scope != nil {
++		hook, outbound = scope(h.authID, h.conn.RemoteAddr(), hook, outbound)
++	}
+ 	// Call the hook if set
+ 	var putback []byte
+ 	var hooked bool
+-	if h.config.RequestHook != nil {
+-		hooked = h.config.RequestHook.Check(false, reqAddr)
++	if hook != nil {
++		hooked = hook.Check(false, reqAddr)
+ 		// When the hook is enabled, the server should always accept a connection
+ 		// so that the client will send whatever request the hook wants to see.
+ 		// This is essentially a server-side fast-open.
+ 		if hooked {
+ 			streamStats.State.Store(StreamStateHooking)
+ 			_ = protocol.WriteTCPResponse(stream, true, "RequestHook enabled")
+-			putback, err = h.config.RequestHook.TCP(stream, &reqAddr)
++			putback, err = hook.TCP(stream, &reqAddr)
+ 			if err != nil {
+ 				_ = stream.Close()
+ 				return
+@@ -307,7 +312,7 @@
+ 	}
+ 	// Dial target
+ 	streamStats.State.Store(StreamStateConnecting)
+-	tConn, err := h.config.Outbound.TCP(reqAddr)
++	tConn, err := outbound.TCP(reqAddr)
+ 	if err != nil {
+ 		if !hooked {
+ 			_ = protocol.WriteTCPResponse(stream, false, err.Error())
+@@ -363,6 +368,16 @@
+ 	TrafficLogger TrafficLogger
+ 	RequestHook   RequestHook
+ 	Outbound      Outbound
++	RequestScope  func(string, net.Addr, RequestHook, Outbound) (RequestHook, Outbound)
++}
++
++func (io *udpIOImpl) sessionIO() udpIO {
++	if io.RequestScope == nil {
++		return io
++	}
++	s := *io
++	s.RequestHook, s.Outbound = io.RequestScope(io.AuthID, io.Conn.RemoteAddr(), io.RequestHook, io.Outbound)
++	return &s
+ }
+ 
+ func (io *udpIOImpl) ReceiveMessage() (*protocol.UDPMessage, error) {
+--- a/server/udp.go
++++ b/server/udp.go
+@@ -167,7 +167,10 @@
+ 	if e.aclCache == nil {
+ 		e.aclCache = make(map[string]error, 4)
+ 	}
+-	e.aclCache[addr] = decision
++	// A dynamic policy denial may be lifted while this session is alive.
++	if decision == nil {
++		e.aclCache[addr] = nil
++	}
+ 	return decision
+ }
+ 
+@@ -345,11 +348,15 @@
+ 
+ 	// Create a new session if not exists
+ 	if entry == nil {
++		io := m.io
++		if scoped, ok := io.(interface{ sessionIO() udpIO }); ok {
++			io = scoped.sessionIO()
++		}
+ 		dialFunc := func(addr string) (UDPConn, error) {
+ 			// Log the event
+ 			m.eventLogger.New(msg.SessionID, addr)
+ 			// Dial target
+-			return m.io.UDP(addr)
++			return io.UDP(addr)
+ 		}
+ 		exitFunc := func(err error) {
+ 			// Log the event
+@@ -361,7 +368,7 @@
+ 			m.mutex.Unlock()
+ 		}
+ 
+-		entry = newUDPSessionEntry(msg.SessionID, m.io, dialFunc, exitFunc)
++		entry = newUDPSessionEntry(msg.SessionID, io, dialFunc, exitFunc)
+ 
+ 		// Insert the session into the map
+ 		m.mutex.Lock()
